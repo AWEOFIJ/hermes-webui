@@ -3145,9 +3145,47 @@ window._applyComposerFooterVisibilitySettings=_applyComposerFooterVisibilitySett
 function _applyTitlebarProfileVisibility(){
   const btn=$('titlebarProfileBtn');
   if(!btn) return;
-  btn.style.display=window._showTitlebarProfile?'':'none';
+  btn.style.display='';
 }
 window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
+
+function _profileStatusButtons(){
+  return [$('titlebarProfileBtn')].filter(Boolean);
+}
+
+function _profileStatusIcons(){
+  return [
+    document.querySelector('#titlebarProfileBtn .app-titlebar-profile-icon'),
+  ].filter(Boolean);
+}
+
+function _applyProfileOnlineStatus(status){
+  const running=!!(status&&status.running&&status.configured);
+  const platforms=Array.isArray(status&&status.platforms)?status.platforms:[];
+  const online=running&&platforms.length>0;
+  const label=online
+    ? `Online${platforms.length?` · ${platforms.map(p=>p&&p.label||p&&p.name||'').filter(Boolean).join(', ')}`:''}`
+    : 'Offline';
+  _profileStatusIcons().forEach(icon=>{
+    icon.classList.toggle('profile-status-online', online);
+    icon.classList.toggle('profile-status-offline', !online);
+  });
+  _profileStatusButtons().forEach(btn=>{
+    const profile=(S&&S.activeProfile)||'default';
+    btn.title=`${profile} · ${label}`;
+    btn.setAttribute('aria-label', `Switch profile (${label})`);
+  });
+}
+
+async function _refreshProfileOnlineStatus(){
+  try{
+    const status=await api('/api/gateway/status');
+    _applyProfileOnlineStatus(status);
+  }catch(_){
+    _applyProfileOnlineStatus(null);
+  }
+}
+window._refreshProfileOnlineStatus=_refreshProfileOnlineStatus;
 
 function _mirrorSpeechSettingsFromServer(s){
   if(!s||typeof s!=='object') return;
@@ -3556,6 +3594,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
   const titleLabel=$('titlebarProfileLabel');
   if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
+  try{ if(typeof _refreshProfileOnlineStatus==='function') _refreshProfileOnlineStatus(); }catch(_){}
   const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;
   const _savedLocalBeforeProfileSwitch=localStorage.getItem('hermes-webui-session');
   const _profileSwitchProfileBefore=S.activeProfile||'default';
@@ -3652,6 +3691,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   window._modelDropdownReady=null;
   window._startBootModelDropdown=_startBootModelDropdown;
   window._ensureModelDropdownReady=_startModelDropdown;
+  try{setInterval(()=>{ try{ if(typeof _refreshProfileOnlineStatus==='function') _refreshProfileOnlineStatus(); }catch(_){} },30000);}catch(_){}
   setTimeout(()=>{
     try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
   },0);

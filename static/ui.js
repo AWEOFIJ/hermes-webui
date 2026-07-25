@@ -10477,6 +10477,20 @@ function syncTopbar(){
       _topbarMeta.appendChild(document.createTextNode(' '));
       _topbarMeta.appendChild(badge);
     }
+    const routeMeta=[];
+    if(S.session){
+      routeMeta.push(`profile: ${String((S.session.profile||'default')).trim()||'default'}`);
+      routeMeta.push(`chat: ${String(S.session.chat_id||'').trim()||'—'}`);
+      routeMeta.push(`thread: ${String(S.session.thread_id||'').trim()||'—'}`);
+      routeMeta.push(`active: ${S.session.is_streaming||S.session.active_stream_id||S.session.has_pending_user_message ? (sourceLabel||S.session.source_label||S.session.source_tag||S.session.raw_source||'active') : 'inactive'}`);
+    }
+    if(routeMeta.length){
+      _topbarMeta.appendChild(document.createTextNode(_topbarMeta.textContent?' · ':''));
+      const metaSpan=document.createElement('span');
+      metaSpan.className='topbar-route-meta';
+      metaSpan.textContent=routeMeta.join(' · ');
+      _topbarMeta.appendChild(metaSpan);
+    }
   }
   if(typeof syncAppTitlebar==='function') syncAppTitlebar();
   if(typeof _syncWorkspaceHeadingState==='function') _syncWorkspaceHeadingState();
@@ -10643,7 +10657,7 @@ function _fmtDateSep(d){
   if(todayStart.getFullYear()!==dStart.getFullYear()) opts.year='numeric';
   return dStart.toLocaleDateString([], opts);
 }
-const _ERR_MSG_RE=/^(?:\*\*error\b|error:|connection lost|no response received)/i;
+const _ERR_MSG_RE=/^(?:\*\*(?:error\b|no response from provider\b)|error:|connection lost|no response (?:received|from provider))/i;
 function _messageHasReasoningPayload(m){
   if(!m||m.role!=='assistant') return false;
   if(m.reasoning||m.reasoning_content||m.thinking||m._reasoning) return true;

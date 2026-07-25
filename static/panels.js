@@ -6842,7 +6842,7 @@ function toggleProfileDropdown(e) {
   closeWsDropdown(); // close workspace dropdown if open
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   // Track which element triggered the dropdown for positioning
-  _profileDropdownTrigger = (e && e.currentTarget) || $('profileChip');
+  _profileDropdownTrigger = (e && e.currentTarget) || $('titlebarProfileBtn') || $('profileChip');
   const openGen = ++_profileDropdownOpenGeneration;
   const cached = _profileDropdownBestCachedData();
 

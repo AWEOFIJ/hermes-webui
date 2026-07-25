@@ -1,5 +1,54 @@
 # Hermes Web UI
 
+> [!IMPORTANT]
+> **Beauty WebUI is an unofficial personal fork** of
+> [nesquena/hermes-webui](https://github.com/nesquena/hermes-webui).
+> The original Hermes WebUI project and its contributors retain credit for the
+> upstream implementation. The customizations described below are maintained by
+> this fork and are not endorsed or supported by the upstream maintainers.
+
+## Beauty fork
+
+Beauty WebUI adds personal UX improvements for long-running Hermes operations:
+
+- Unified WebUI and messaging conversation management
+- All sources / WebUI / Other sources / Platform filters
+- Global profile selector with connection status
+- Session profile and routing metadata
+- Readable assistant cards and provider-error highlighting
+- Long-conversation outline, search, result count, and jump navigation
+- Larger typography and reduced conversation padding
+
+### Branch and release policy
+
+- [`master`](https://github.com/AWEOFIJ/hermes-webui/tree/master) remains the
+  fork's default, upstream-facing branch.
+- [`beauty`](https://github.com/AWEOFIJ/hermes-webui/tree/beauty) contains the
+  personal customized version.
+- Stable Beauty releases use tags such as
+  [`beauty-v0.1.0`](https://github.com/AWEOFIJ/hermes-webui/releases/tag/beauty-v0.1.0).
+- Upstream updates are reviewed and tested separately before they are integrated
+  into `beauty`.
+
+### Support boundary
+
+For problems specific to the `beauty` customizations, report them through the
+channel you normally use to contact the maintainer of this fork (for example,
+the commit history, Release notes, or the same chat you used to request these
+customizations). Report an issue to the
+[upstream repository](https://github.com/nesquena/hermes-webui/issues) only after
+confirming that it is reproducible without the Beauty customizations. Please do
+not ask upstream maintainers to support fork-specific behavior.
+
+### Source and license
+
+- Upstream project: <https://github.com/nesquena/hermes-webui>
+- Beauty fork: <https://github.com/AWEOFIJ/hermes-webui>
+- License: [MIT](LICENSE). The original copyright and license notice are
+  preserved unchanged.
+
+---
+
 [Hermes Agent](https://hermes-agent.nousresearch.com/) is a sophisticated autonomous agent that lives on your server, accessed via a terminal or messaging apps, that remembers what it learns and gets more capable the longer it runs.
 
 Hermes WebUI is a lightweight, dark-themed web app interface in your browser for [Hermes Agent](https://hermes-agent.nousresearch.com/).

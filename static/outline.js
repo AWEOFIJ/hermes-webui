@@ -10,6 +10,8 @@ let _outlineSid = null;       // session id the panel was last built for
 let _panelOpen  = false;      // whether the panel is currently visible
 let _outlineResizeObserver = null;
 let _outlineWorkspaceObserver = null;
+let _outlineTranscriptObserver = null;
+let _longTranscriptSid = null;
 
 // Returns the current session id, or null if no session is loaded.
 function _currentSid() {
@@ -18,6 +20,16 @@ function _currentSid() {
 
 function _outlineAllowed() {
   const compact = window.matchMedia && window.matchMedia('(max-width:900px)').matches;
+  // Long transcripts expose navigation automatically; short transcripts still
+  // respect the explicit preference so the normal chat view stays uncluttered.
+  const loadedUserTurns = (S && Array.isArray(S.messages))
+    ? S.messages.filter(function(m) { return m && m.role === 'user' && _excerptText(m.content); }).length
+    : 0;
+  const storedUserTurns = (S && S.session) ? Number(S.session.user_message_count || 0) : 0;
+  const sid = _currentSid();
+  const measuredLong = Math.max(loadedUserTurns, storedUserTurns) >= 8;
+  if (measuredLong && sid) _longTranscriptSid = sid;
+  const longTranscript = measuredLong || (!!sid && _longTranscriptSid === sid);
   // The outline is a chat-view affordance only — never show the toggle or panel
   // while another MAIN panel (settings, tasks, insights, …) is active. _currentPanel
   // is owned by panels.js; treat an undefined/absent value as the chat default.
@@ -26,7 +38,7 @@ function _outlineAllowed() {
   // mutation for the observer, so allowing it keeps the toggle stable).
   const panel = (typeof _currentPanel === 'undefined') ? 'chat' : (_currentPanel || 'chat');
   const onChatView = panel === 'chat' || panel === 'todos';
-  return window._showConversationOutline === true && !compact && onChatView;
+  return (window._showConversationOutline === true || longTranscript) && !compact && onChatView;
 }
 
 function _syncOutlinePosition() {
@@ -44,8 +56,7 @@ function applyConversationOutlinePreference() {
   document.documentElement.dataset.conversationOutline = enabled ? 'enabled' : 'disabled';
   _syncOutlinePosition();
   if (toggle) toggle.hidden = !enabled;
-  if (!enabled) {
-    _panelOpen = false;
+  if (!enabled && !_panelOpen) {
     if (wrapper) wrapper.hidden = true;
   }
 }
@@ -156,6 +167,9 @@ function _renderPanel() {
   if (!panel) return;
 
   const sid = _currentSid();
+  const search = document.getElementById('outlineSearch');
+  const count = document.getElementById('outlineCount');
+  const query = String(search && search.value || '').trim().toLocaleLowerCase();
 
   // Session-scoped staleness guard.
   if (!sid) {
@@ -171,7 +185,11 @@ function _renderPanel() {
   }
 
   _outlineSid = sid;
-  const entries = _buildEntries();
+  const allEntries = _buildEntries();
+  const entries = query
+    ? allEntries.filter(function(e) { return e.excerpt.toLocaleLowerCase().includes(query); })
+    : allEntries;
+  if (count) count.textContent = entries.length + '/' + allEntries.length;
 
   if (!entries.length) {
     panel.innerHTML = '<p class="outline-empty">' + t('outline_empty') + '</p>';
@@ -227,6 +245,7 @@ function toggleOutlinePanel() {
 
 // Jump target exposed on window so inline onclick handlers can reach it.
 window._outlineJump = _jumpToMessage;
+window._outlineFilter = function() { _renderPanel(); };
 window.applyConversationOutlinePreference = applyConversationOutlinePreference;
 
 // Re-render after renderMessages() if the panel is open and the session
@@ -247,6 +266,7 @@ window.applyConversationOutlinePreference = applyConversationOutlinePreference;
   window._outlineRenderHookPending = false;
   window.renderMessages = function() {
     const result = _orig.apply(this, arguments);
+    applyConversationOutlinePreference();
     if (_panelOpen) {
       const sid = _currentSid();
       if (sid && (sid !== _outlineSid || (S.messages || []).length > 0)) {
@@ -267,6 +287,25 @@ document.addEventListener('DOMContentLoaded', function() {
   if (rightPanel && typeof ResizeObserver !== 'undefined' && !_outlineResizeObserver) {
     _outlineResizeObserver = new ResizeObserver(_syncOutlinePosition);
     _outlineResizeObserver.observe(rightPanel);
+  }
+  if (!_outlineTranscriptObserver) {
+    const transcript = document.getElementById('msgInner');
+    if (transcript) {
+      let scheduled = false;
+      _outlineTranscriptObserver = new MutationObserver(function() {
+        if (scheduled) return;
+        scheduled = true;
+        window.requestAnimationFrame(function() {
+          scheduled = false;
+          if (_panelOpen) {
+            _renderPanel();
+          } else {
+            applyConversationOutlinePreference();
+          }
+        });
+      });
+      _outlineTranscriptObserver.observe(transcript, { childList: true });
+    }
   }
   if (!_outlineWorkspaceObserver) {
     _outlineWorkspaceObserver = new MutationObserver(applyConversationOutlinePreference);

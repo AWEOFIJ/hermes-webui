@@ -9623,6 +9623,12 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "raw_source",
     "session_source",
     "source_label",
+    "user_id",
+    "chat_id",
+    "chat_type",
+    "thread_id",
+    "session_key",
+    "platform",
     "is_cli_session",
     "is_messaging_session",
     "is_streaming",
@@ -16489,10 +16495,7 @@ def _serve_static(handler, parsed):
     # is safe to cache aggressively: any redeploy changes the URL.
     version_values = parse_qs(parsed.query, keep_blank_values=True).get("v", [""])
     has_fingerprint = bool(version_values[0])
-    cache_control = (
-        "public, max-age=31536000, immutable" if has_fingerprint
-        else "public, max-age=300"
-    )
+    cache_control = "no-store"
 
     # 304 short-circuit on conditional GET.
     if handler.headers.get("If-None-Match") == etag:

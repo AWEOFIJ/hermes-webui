@@ -42,6 +42,7 @@ def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> 
 MESSAGING_SOURCES = {
     'discord',
     'email',
+    'line',
     'wecom',
     'wecom_callback',
     'slack',
@@ -59,6 +60,7 @@ SOURCE_LABELS = {
     'cron': 'Cron',
     'discord': 'Discord',
     'email': 'Email',
+    'line': 'LINE',
     'wecom': 'WeCom',
     'wecom_callback': 'WeCom Callback',
     'slack': 'Slack',

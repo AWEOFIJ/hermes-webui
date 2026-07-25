@@ -2335,7 +2335,7 @@ const _HANDOFF_THRESHOLD = 10;  // conversation rounds
 const _HANDOFF_STORAGE_PREFIX = 'handoff:';
 const _HANDOFF_SUFFIX_DISMISSED_AT = 'dismissed_at';
 const _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT = 'summary_handled_at';
-const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback']);
+const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback', 'line']);
 const _MESSAGING_SOURCE_LABELS = {
   weixin: 'WeChat',
   telegram: 'Telegram',
@@ -2344,7 +2344,17 @@ const _MESSAGING_SOURCE_LABELS = {
   email: 'Email',
   wecom: 'WeCom',
   wecom_callback: 'WeCom Callback',
+  line: 'LINE',
 };
+// Single "PLATFORM" chip that opens a picker menu listing every supported
+// platform. The chip only renders when at least one messaging platform has
+// data, so the source tab row stays compact for users who only have CLI / WebUI.
+const _PLATFORM_FILTER_BUTTONS = [
+  { key: 'telegram', label: 'Telegram', rawSource: 'telegram' },
+  { key: 'line', label: 'LINE', rawSource: 'line' },
+];
+
+let _platformMenuOpenFor = null;
 
 function _isMessagingSession(session) {
   if (!session) return false;
@@ -2409,6 +2419,8 @@ async function _ensureSidebarSessionProfile(session){
 
 async function _openSidebarSession(session, loadOpts={}){
   if(!session||!session.session_id) return;
+  const takeoverConfirmed=await _confirmSessionTakeover(session);
+  if(!takeoverConfirmed) return;
   if(_isExternalSession(session)){
     try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(session))});}
     catch(_e){ /* import failed -- fall through to read-only view */ }
@@ -2456,7 +2468,94 @@ function _isCliSession(session) {
 
 function _sessionSourceLabel(filter, count) {
   const n = Number(count) || 0;
-  return filter === 'cli' ? `CLI sessions (${n})` : `WebUI sessions (${n})`;
+  if(filter==='all') return `All sources (${n})`;
+  if(filter==='cli') return `Other sources (${n})`;
+  return `WebUI (${n})`;
+}
+
+function _sessionRawSourceKey(session){
+  if(!session) return '';
+  return String(
+    session.raw_source
+    || session.source_tag
+    || session.source
+    || (session.source_label||'').toLowerCase()
+    || ''
+  ).toLowerCase();
+}
+
+function _isPlatformSession(session, rawKey){
+  if(!session) return false;
+  if(_sessionRawSourceKey(session)===rawKey) return true;
+  if(_isMessagingSession(session)){
+    const raw=_sessionRawSourceKey(session);
+    if(raw===rawKey) return true;
+  }
+  return false;
+}
+
+function _buildSessionByPlatform(sessions){
+  const byPlatform={};
+  if(!Array.isArray(sessions)) return byPlatform;
+  for(const s of sessions){
+    if(!s) continue;
+    for(const p of _PLATFORM_FILTER_BUTTONS){
+      if(_isPlatformSession(s, p.rawSource)) byPlatform[p.key]=(byPlatform[p.key]||0)+1;
+    }
+  }
+  return byPlatform;
+}
+
+async function _fetchPlatformCounts(){
+  try {
+    // The current /api/sessions payload already contains every session we
+    // need — both the visible webui rows and the cli bucket live in
+    // `allSessionsRaw` / `allReferenceRaw` from this very render. Re-issuing
+    // an HTTP fetch is a redundant round-trip and only delays the first
+    // render. Build the per-platform counts straight from the in-memory
+    // session list.
+    const rows=[];
+    const _all=typeof _allSessions!=='undefined' && Array.isArray(_allSessions)?_allSessions:null;
+    if(_all) for(const s of _all) rows.push(s);
+    if(typeof _sidebarReferenceSessions!=='undefined' && Array.isArray(_sidebarReferenceSessions)){
+      for(const s of _sidebarReferenceSessions){
+        if(s && rows.indexOf(s)===-1) rows.push(s);
+      }
+    }
+    return _buildSessionByPlatform(rows);
+  } catch(_){
+    return {};
+  }
+}
+
+function _displaySessionMetaValue(value){
+  const text=String(value==null?'':value).trim();
+  return text||'—';
+}
+
+function _activeSessionSourceLabel(session){
+  if(!session) return 'inactive';
+  if(session.is_streaming||session.active_stream_id||session.has_pending_user_message){
+    return _getChannelLabel(session)||session.source_label||session.source_tag||session.raw_source||'active';
+  }
+  return 'inactive';
+}
+
+function _sessionTakeoverMessage(session){
+  const source=_displaySessionMetaValue(_getChannelLabel(session)||session.source_label||session.source_tag||session.raw_source);
+  const profile=_displaySessionMetaValue(session&&session.profile);
+  const chat=_displaySessionMetaValue(session&&session.chat_id);
+  const thread=_displaySessionMetaValue(session&&session.thread_id);
+  return `source: ${source} · profile: ${profile} · chat: ${chat} · thread: ${thread}\n\nContinue this conversation in WebUI? If the original platform is still active, avoid replying on both sides at the same time.`;
+}
+
+async function _confirmSessionTakeover(session){
+  if(!_isExternalSession(session)) return true;
+  if(typeof showToast==='function'){
+    const source=_displaySessionMetaValue(_getChannelLabel(session)||session.source_label||session.source_tag||session.raw_source);
+    showToast(`已在 WebUI 開啟 ${source} 對話；避免兩邊同時回覆。`, 2600, 'info');
+  }
+  return true;
 }
 
 function _clearSessionSourceTabCounts() {
@@ -2465,7 +2564,18 @@ function _clearSessionSourceTabCounts() {
 }
 
 function _requestedSessionSidebarSource() {
-  return window._showCliSessions ? _sessionSourceFilter : 'webui';
+  if(!window._showCliSessions) return 'webui';
+  if(_sessionSourceFilter==='all') return null;
+  if(_sessionSourceFilter==='webui') return 'webui';
+  if(_sessionSourceFilter==='cli') return 'cli';
+  // Platform-specific filter (Telegram / LINE / …) is a client-side
+  // partition, so we still request the full payload from the server and
+  // narrow it down locally.
+  return null;
+}
+
+function _isPlatformFilter(filter){
+  return !!filter && _PLATFORM_FILTER_BUTTONS.some(p=>p.key===filter);
 }
 
 function _sessionListExcludeHiddenEnabled() {
@@ -2483,7 +2593,8 @@ function _sessionArchivePagingFilterActive() {
 
 function _sessionListQueryString() {
   const qs = new URLSearchParams();
-  qs.set('sidebar_source', _requestedSessionSidebarSource());
+  const requestedSource=_requestedSessionSidebarSource();
+  if(requestedSource) qs.set('sidebar_source', requestedSource);
   if(_sessionListExcludeHiddenEnabled()) qs.set('exclude_hidden','1');
   if(_showAllProfiles) qs.set('all_profiles','1');
   if(_showArchived){
@@ -2500,6 +2611,12 @@ function _sessionListQueryString() {
 }
 
 function _sessionSourceTabCount(filter, renderedWebuiSessionCount, renderedCliSessionCount) {
+  if(filter==='all'){
+    const serverWebui=Number(_serverWebuiSessionCount);
+    const serverCli=Number(_serverCliSessionCount);
+    if(Number.isFinite(serverWebui)&&Number.isFinite(serverCli)) return serverWebui+serverCli;
+    return Number(renderedWebuiSessionCount||0)+Number(renderedCliSessionCount||0);
+  }
   const serverCount = filter === 'cli' ? _serverCliSessionCount : _serverWebuiSessionCount;
   if (Number.isFinite(serverCount)) return serverCount;
   return filter === 'cli' ? renderedCliSessionCount : renderedWebuiSessionCount;
@@ -2514,7 +2631,7 @@ function _setActiveProjectFilter(projectId) {
 }
 
 function _setSessionSourceFilter(filter) {
-  const next = filter === 'cli' ? 'cli' : 'webui';
+  const next = filter === 'cli' ? 'cli' : (filter === 'all' ? 'all' : (filter === 'webui' ? 'webui' : filter));
   if (_sessionSourceFilter === next) return;
   _sessionSourceFilter = next;
   _activeProject = null;
@@ -2528,7 +2645,7 @@ function _setSessionSourceFilter(filter) {
 function _restoreSessionSourceFilter() {
   try {
     const raw = localStorage.getItem('hermes-session-source-filter');
-    if (raw === 'cli' || raw === 'webui') _sessionSourceFilter = raw;
+    if (raw === 'all' || raw === 'cli' || raw === 'webui' || _PLATFORM_FILTER_BUTTONS.some(p=>p.key===raw)) _sessionSourceFilter = raw;
   } catch (_e) {}
 }
 
@@ -3762,7 +3879,41 @@ let _archivedCliCount = 0;        // archived non-WebUI sessions not fetched unt
 let _archivedRowsLoadedLimit = SESSION_ARCHIVED_PAGE_SIZE;
 let _serverWebuiSessionCount = null;  // explicit server count for WebUI sessions
 let _serverCliSessionCount = null;    // explicit server count for CLI sessions
-let _sessionSourceFilter = 'webui';  // 'webui' keeps WebUI chats separate from read-only CLI sessions
+let _sessionSourceFilter = 'all';  // all/webui/cli; default to unified cross-source session management
+let _platformCountsByKey=null;
+let _platformCountsLoading=false;
+// Expose the platform-counts cache on `window` immediately so error
+// handlers reading `window._platformCountsByKey` from the same sessions.js
+// module never see ReferenceError before _refreshPlatformCounts runs.
+Object.defineProperty(window, '_platformCountsByKey', {
+  configurable: true,
+  get(){ return _platformCountsByKey; },
+  set(v){ _platformCountsByKey = v; },
+});
+async function _refreshPlatformCounts(){
+  if(_platformCountsLoading) return _platformCountsByKey||{};
+  _platformCountsLoading=true;
+  try {
+    // The current /api/sessions payload already contains every session we
+    // need — both the visible webui rows and the cli bucket live in
+    // `_allSessions` / `_sidebarReferenceSessions`. Building per-platform
+    // counts straight from the in-memory session list avoids an extra HTTP
+    // round-trip on every render.
+    const rows=[];
+    const _all=typeof _allSessions!=='undefined' && Array.isArray(_allSessions)?_allSessions:null;
+    if(_all) for(const s of _all) rows.push(s);
+    if(typeof _sidebarReferenceSessions!=='undefined' && Array.isArray(_sidebarReferenceSessions)){
+      for(const s of _sidebarReferenceSessions){
+        if(s && rows.indexOf(s)===-1) rows.push(s);
+      }
+    }
+    _platformCountsByKey=_buildSessionByPlatform(rows);
+  } finally {
+    _platformCountsLoading=false;
+  }
+  return _platformCountsByKey;
+}
+window._refreshPlatformCounts=_refreshPlatformCounts;
 
 function _restoreShowAllProfiles(){
   try{
@@ -6352,8 +6503,14 @@ function filterSessions(){
 }
 
 function _sessionTimestampMs(session) {
-  const raw = Number(session && (session._sidebar_activity_at || session.last_message_at || session.updated_at || session.created_at || 0));
-  return Number.isFinite(raw) ? raw * 1000 : 0;
+  const values=[
+    Number(session && session._sidebar_activity_at || 0),
+    Number(session && session.last_message_at || 0),
+    Number(session && session.updated_at || 0),
+    Number(session && session.created_at || 0),
+  ].filter(v=>Number.isFinite(v)&&v>0);
+  if(!values.length) return 0;
+  return Math.max(...values) * 1000;
 }
 
 function _sessionSortTimestampMs(session) {
@@ -6444,10 +6601,10 @@ function _sessionCalendarBoundaries(nowMs) {
 function _formatSessionDate(timestampMs, nowMs) {
   nowMs = nowMs || _serverNowMs();
   const date = new Date(timestampMs);
-  const now = new Date(nowMs);
-  const options = {month:'short', day:'numeric'};
-  if (date.getFullYear() !== now.getFullYear()) options.year = 'numeric';
-  return date.toLocaleDateString(undefined, options);
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 function _formatRelativeSessionTime(timestampMs, nowMs) {
@@ -6456,8 +6613,7 @@ function _formatRelativeSessionTime(timestampMs, nowMs) {
   const diffMs = Math.max(0, nowMs - timestampMs);
   const minute = 60 * 1000;
   const hour = 60 * minute;
-  const {startOfToday, startOfYesterday, startOfWeek, startOfLastWeek} = _sessionCalendarBoundaries(nowMs);
-  const dayDiff = Math.max(0, _localDayOrdinal(nowMs) - _localDayOrdinal(timestampMs));
+  const {startOfToday} = _sessionCalendarBoundaries(nowMs);
   if (timestampMs >= startOfToday) {
     if (diffMs < minute) return t('session_time_minutes_ago', 1);
     if (diffMs < hour) {
@@ -6467,9 +6623,6 @@ function _formatRelativeSessionTime(timestampMs, nowMs) {
     const hours = Math.floor(diffMs / hour);
     return t('session_time_hours_ago', hours);
   }
-  if (timestampMs >= startOfYesterday) return t('session_time_days_ago', 1);
-  if (timestampMs >= startOfWeek) return t('session_time_days_ago', dayDiff);
-  if (timestampMs >= startOfLastWeek) return t('session_time_last_week');
   return _formatSessionDate(timestampMs, nowMs);
 }
 
@@ -7265,19 +7418,29 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
 
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   let cliSessionCount=0;
+  let platformSessionCount=0;
+  const allProfileFiltered=[];
   const webuiProfileFiltered=[];
   const cliProfileFiltered=[];
+  const platformProfileFiltered={};
+  const allReferenceRaw=[];
   const webuiReferenceRaw=[];
   const cliReferenceRaw=[];
+  const platformReferenceRaw={};
+  const allSessionsRaw=[];
   const webuiSessionsRaw=[];
   const cliSessionsRaw=[];
+  const platformSessionsRaw={};
+  let allArchivedCount=0;
   let webuiArchivedCount=0;
   let cliArchivedCount=0;
+  const activePlatformFilter=_isPlatformFilter(_sessionSourceFilter)?_sessionSourceFilter:null;
   for(const s of allMatched){
     if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
     const isCli=_isCliSession(s);
     if(isCli) cliSessionCount++;
     if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;
+    allProfileFiltered.push(s);
     const profileFiltered=isCli ? cliProfileFiltered : webuiProfileFiltered;
     const referenceRaw=isCli ? cliReferenceRaw : webuiReferenceRaw;
     const sessionsRaw=isCli ? cliSessionsRaw : webuiSessionsRaw;
@@ -7287,28 +7450,70 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     } else if(_activeProject){
       if(s.project_id!==_activeProject) continue;
     }
+    allReferenceRaw.push(s);
     referenceRaw.push(s);
+    // Platform-specific partition (client-side only; one session can live in
+    // multiple platform buckets if its raw_source is ambiguous, so we dedupe
+    // against allProfileFiltered rather than re-counting).
+    for(const p of _PLATFORM_FILTER_BUTTONS){
+      if(_isPlatformSession(s, p.rawSource)){
+        platformSessionCount++;
+        if(!platformProfileFiltered[p.key]) platformProfileFiltered[p.key]=[];
+        if(!platformReferenceRaw[p.key]) platformReferenceRaw[p.key]=[];
+        if(!platformSessionsRaw[p.key]) platformSessionsRaw[p.key]=[];
+        platformProfileFiltered[p.key].push(s);
+        platformReferenceRaw[p.key].push(s);
+        if(activePlatformFilter===p.key) platformSessionsRaw[p.key].push(s);
+      }
+    }
     if(s.archived){
+      allArchivedCount++;
       if(isCli) cliArchivedCount++;
       else webuiArchivedCount++;
     }
     if(!_showArchived&&s.archived) continue;
+    allSessionsRaw.push(s);
     sessionsRaw.push(s);
   }
   if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
     _sessionSourceFilter='webui';
   }
-  const showCliOnly=_sessionSourceFilter==='cli';
-  const serverArchivedCount=showCliOnly?_archivedCliCount:_archivedWebuiCount;
+  const activeFilter=_sessionSourceFilter==='cli'?'cli':(_sessionSourceFilter==='webui'?'webui':(_isPlatformFilter(_sessionSourceFilter)?_sessionSourceFilter:'all'));
+  const serverArchivedCount=activeFilter==='cli'
+    ? _archivedCliCount
+    : (activeFilter==='webui' ? _archivedWebuiCount : (Number(_archivedWebuiCount||0)+Number(_archivedCliCount||0)));
+  let sourceProfileFiltered;
+  let sourceSessionsRaw;
+  let sourceArchivedCount;
+  if(activeFilter==='cli'){
+    sourceProfileFiltered=cliProfileFiltered;
+    sourceSessionsRaw=cliSessionsRaw;
+    sourceArchivedCount=cliArchivedCount;
+  } else if(activeFilter==='webui'){
+    sourceProfileFiltered=webuiProfileFiltered;
+    sourceSessionsRaw=webuiSessionsRaw;
+    sourceArchivedCount=webuiArchivedCount;
+  } else if(_isPlatformFilter(activeFilter)){
+    sourceProfileFiltered=platformProfileFiltered[activeFilter]||[];
+    sourceSessionsRaw=platformSessionsRaw[activeFilter]||[];
+    sourceArchivedCount=0; // platform filter doesn't surface an archive count yet
+  } else {
+    sourceProfileFiltered=allProfileFiltered;
+    sourceSessionsRaw=allSessionsRaw;
+    sourceArchivedCount=allArchivedCount;
+  }
   return {
     cliSessionCount,
-    profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered,
-    sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw,
-    archivedCount: Math.max(showCliOnly ? cliArchivedCount : webuiArchivedCount, Number(serverArchivedCount||0)),
+    profileFiltered: sourceProfileFiltered,
+    sessionsRaw: sourceSessionsRaw,
+    archivedCount: Math.max(sourceArchivedCount, Number(serverArchivedCount||0)),
+    allReferenceRaw,
     webuiReferenceRaw,
     cliReferenceRaw,
+    allSessionsRaw,
     webuiSessionsRaw,
     cliSessionsRaw,
+    platformSessionCount,
   };
 }
 
@@ -7320,12 +7525,13 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
 // suppression context — silently hiding a visible child/fork whose archived
 // ancestor lives outside the current view. Scope the references to the same
 // project + source bucket as the render they feed before using them.
-function _scopedSidebarReferenceRows(isCli){
+function _scopedSidebarReferenceRows(filter){
   if(typeof _sidebarReferenceSessions==='undefined'||!Array.isArray(_sidebarReferenceSessions)||!_sidebarReferenceSessions.length) return [];
+  const activeFilter=filter==='cli'?'cli':(filter==='webui'?'webui':'all');
   return _sidebarReferenceSessions.filter(s=>{
     if(!s) return false;
-    // Source scope: only references in the same webui/cli bucket as this render.
-    if(_isCliSession(s)!==!!isCli) return false;
+    // Source scope: only references in the same view bucket as this render.
+    if(activeFilter!=='all' && _isCliSession(s)!==(activeFilter==='cli')) return false;
     // Project scope: mirror _partitionSidebarSessionRows exactly.
     if(_activeProject===NO_PROJECT_FILTER){ if(s.project_id) return false; }
     else if(_activeProject){ if(s.project_id!==_activeProject) return false; }
@@ -7424,24 +7630,28 @@ function renderSessionListFromCache(){
     profileFiltered,
     sessionsRaw,
     archivedCount,
+    allReferenceRaw,
     webuiReferenceRaw,
     cliReferenceRaw,
+    allSessionsRaw,
     webuiSessionsRaw,
     cliSessionsRaw,
   }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
-  const referenceRaw=_sessionSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw;
-  const isCliView=_sessionSourceFilter==='cli';
-  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)]);
+  const activeFilter=_sessionSourceFilter==='cli'?'cli':(_sessionSourceFilter==='webui'?'webui':(_isPlatformFilter(_sessionSourceFilter)?_sessionSourceFilter:'all'));
+  const referenceRaw=activeFilter==='cli'?cliReferenceRaw:(activeFilter==='webui'?webuiReferenceRaw:allReferenceRaw);
+  const isCliView=activeFilter==='cli';
+  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(activeFilter)]);
   // Server-provided source bucket counts are authoritative for the current
   // payload. When present, skip the expensive cross-bucket render/count pass;
   // null is a deliberate "not computed" sentinel consumed only by
   // _sessionSourceTabCount's fallback path below.
   const renderedWebuiSessionCount=_serverWebuiSessionCount===null
-    ? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)]).length
+    ? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows('webui')]).length
     : null;
   const renderedCliSessionCount=_serverCliSessionCount===null
-    ? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true)]).length
+    ? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows('cli')]).length
     : null;
+  const allSessionTabCount=_sessionSourceTabCount('all', renderedWebuiSessionCount, renderedCliSessionCount);
   const webuiSessionTabCount=_sessionSourceTabCount('webui', renderedWebuiSessionCount, renderedCliSessionCount);
   const cliSessionTabCount=_sessionSourceTabCount('cli', renderedWebuiSessionCount, renderedCliSessionCount);
   _syncSidebarExpansionForActiveSession(sessions, activeSidForSidebar);
@@ -7488,17 +7698,112 @@ function renderSessionListFromCache(){
   if(window._showCliSessions || cliSessionCount>0){
     const sourceTabs=document.createElement('div');
     sourceTabs.className='session-source-tabs';
-    for(const filter of ['webui','cli']){
-      const count=filter==='cli'?cliSessionTabCount:webuiSessionTabCount;
+    for(const filter of ['all','webui','cli']){
+      const count=filter==='all'?allSessionTabCount:(filter==='cli'?cliSessionTabCount:webuiSessionTabCount);
       const btn=document.createElement('button');
       btn.type='button';
       btn.className='session-source-tab'+(_sessionSourceFilter===filter?' active':'');
       btn.textContent=_sessionSourceLabel(filter,count);
       btn.setAttribute('aria-pressed', _sessionSourceFilter===filter?'true':'false');
-      btn.onclick=()=>_setSessionSourceFilter(filter);
+      btn.onclick=()=>{ _closePlatformMenu(); _setSessionSourceFilter(filter); };
       sourceTabs.appendChild(btn);
     }
+    // Platform chip: a single PLATFORM button that opens a dropdown of
+    // platforms. Only renders when at least one messaging platform has data.
+    // The menu lives OUTSIDE the sourceTabs container so it can position
+    // absolutely and not be clipped, and is re-created on each open so
+    // stale DOM cannot leak between renders. Stays uncolored by default;
+    // it only shows a soft active border when a specific platform is picked.
+    const byPlatform=_platformCountsByKey||_buildSessionByPlatform(allSessionsRaw.concat(allReferenceRaw));
+    const availablePlatforms=_PLATFORM_FILTER_BUTTONS.filter(p=>Number(byPlatform[p.key]||0)>0);
+    if(availablePlatforms.length){
+      const platformTotal=availablePlatforms.reduce((a,p)=>a+Number(byPlatform[p.key]||0),0);
+      const isPlatformFilter=_isPlatformFilter(_sessionSourceFilter);
+      const activePlatformName=isPlatformFilter
+        ? (availablePlatforms.find(p=>p.key===_sessionSourceFilter)||{}).label
+        : '';
+      const trigger=document.createElement('button');
+      trigger.type='button';
+      trigger.className='session-source-tab session-source-tab--platform'+(isPlatformFilter?' active':'');
+      trigger.textContent=isPlatformFilter
+        ? `${activePlatformName} (${Number(byPlatform[_sessionSourceFilter]||0)})`
+        : `PLATFORM (${platformTotal})`;
+      trigger.setAttribute('aria-haspopup','menu');
+      trigger.setAttribute('aria-expanded', isPlatformFilter?'true':'false');
+      trigger.setAttribute('aria-pressed', isPlatformFilter?'true':'false');
+      trigger.dataset.platformMenuTrigger='1';
+      trigger.onclick=(e)=>{
+        e.stopPropagation();
+        _togglePlatformMenu(trigger, byPlatform, availablePlatforms, platformTotal, isPlatformFilter);
+      };
+      sourceTabs.appendChild(trigger);
+    }
     list.appendChild(sourceTabs);
+    // Platform counts are derived synchronously from the payload above.
+    // Do not schedule a cache re-render here: the previous unconditional
+    // promise callback recursively called renderSessionListFromCache(),
+    // pegging the browser renderer and making WebUI unresponsive.
+  }
+
+  function _closePlatformMenu(){
+    const open=document.querySelector('.platform-filter-menu[data-open="1"]');
+    if(open) open.remove();
+    const trigger=document.querySelector('[data-platform-menu-trigger="1"]');
+    if(trigger) trigger.setAttribute('aria-expanded','false');
+  }
+
+  function _togglePlatformMenu(trigger, byPlatform, availablePlatforms, platformTotal, isPlatformFilter){
+    const existing=document.querySelector('.platform-filter-menu[data-open="1"]');
+    if(existing && existing.dataset.owner==='1'){
+      existing.remove();
+      trigger.setAttribute('aria-expanded','false');
+      return;
+    }
+    if(existing) existing.remove();
+    const menu=document.createElement('div');
+    menu.className='platform-filter-menu';
+    menu.setAttribute('role','menu');
+    menu.dataset.open='1';
+    menu.dataset.owner='1';
+    const allBtn=document.createElement('button');
+    allBtn.type='button';
+    allBtn.className='platform-filter-opt'+((!isPlatformFilter?' active':''));
+    allBtn.textContent=`All platforms (${platformTotal})`;
+    allBtn.setAttribute('role','menuitem');
+    allBtn.onclick=()=>{
+      _closePlatformMenu();
+      _setSessionSourceFilter('all');
+    };
+    menu.appendChild(allBtn);
+    for(const p of availablePlatforms){
+      const opt=document.createElement('button');
+      opt.type='button';
+      opt.className='platform-filter-opt'+((_sessionSourceFilter===p.key?' active':''));
+      opt.textContent=`${p.label} (${Number(byPlatform[p.key]||0)})`;
+      opt.setAttribute('role','menuitem');
+      opt.onclick=()=>{
+        _closePlatformMenu();
+        _setSessionSourceFilter(p.key);
+      };
+      menu.appendChild(opt);
+    }
+    // Position the menu so it stays attached to the button even if the
+    // sourceTabs row reflows.
+    const rect=trigger.getBoundingClientRect();
+    menu.style.position='fixed';
+    menu.style.top=(rect.bottom + 6)+'px';
+    menu.style.right=(window.innerWidth-rect.right)+'px';
+    menu.style.zIndex='60';
+    document.body.appendChild(menu);
+    trigger.setAttribute('aria-expanded','true');
+    const onDocClick=(ev)=>{
+      if(!menu.contains(ev.target) && ev.target!==trigger){
+        menu.remove();
+        trigger.setAttribute('aria-expanded','false');
+        document.removeEventListener('click', onDocClick, true);
+      }
+    };
+    document.addEventListener('click', onDocClick, true);
   }
   // Project filter bar — show when there are real projects OR there are
   // unassigned sessions (so the Unassigned chip has something to filter to).
@@ -7635,7 +7940,12 @@ function renderSessionListFromCache(){
   if(_sessionSourceFilter==='cli'&&sessions.length===0){
     const empty=document.createElement('div');
     empty.className='session-empty-note';
-    empty.textContent=window._showCliSessions?'No CLI sessions found.':'Enable Show agent sessions in Settings to list CLI sessions here.';
+    empty.textContent=window._showCliSessions?'No non-WebUI sessions found.':'Enable Show non-WebUI sessions in Settings to list other platform conversations here.';
+    list.appendChild(empty);
+  } else if(_sessionSourceFilter==='all'&&sessions.length===0){
+    const empty=document.createElement('div');
+    empty.className='session-empty-note';
+    empty.textContent='No conversations found across any source.';
     list.appendChild(empty);
   } else if(_activeProject&&sessions.length===0){
     const empty=document.createElement('div');
@@ -7779,8 +8089,14 @@ function renderSessionListFromCache(){
   }
   const archivePagingFilterActive=_sessionArchivePagingFilterActive();
   if(_showArchived&&!archivePagingFilterActive){
-    const activeArchivedTotal=_sessionSourceFilter==='cli'?_archivedCliCount:_archivedWebuiCount;
-    const loadedArchivedCount=sidebarRows.filter(s=>s&&s.archived&&(_sessionSourceFilter==='cli'?_isCliSession(s):!_isCliSession(s))).length;
+    const activeArchivedTotal=_sessionSourceFilter==='cli'
+      ? _archivedCliCount
+      : (_sessionSourceFilter==='webui' ? _archivedWebuiCount : (Number(_archivedWebuiCount||0)+Number(_archivedCliCount||0)));
+    const loadedArchivedCount=sidebarRows.filter(s=>s&&s.archived&&(
+      _sessionSourceFilter==='cli'
+        ? _isCliSession(s)
+        : (_sessionSourceFilter==='webui' ? !_isCliSession(s) : true)
+    )).length;
     const archiveLoadCapReached=Number(_archivedRowsLoadedLimit||0)>=SESSION_ARCHIVED_MAX_LOADED_LIMIT;
     const remainingArchived=archiveLoadCapReached?0:Math.max(0, Number(activeArchivedTotal||0)-loadedArchivedCount);
     if(remainingArchived>0){
@@ -7977,12 +8293,12 @@ function renderSessionListFromCache(){
       };
       titleRow.appendChild(childCountEl);
     }
-    if(s.is_cli_session||_isMessagingSession(s)){
-      const chipLabel=_getChannelLabel(s)||'CLI';
+    const chipLabel=_getChannelLabel(s)||s.source_label||s.source_tag||s.raw_source||'';
+    if(chipLabel){
       const chip=document.createElement('span');
       chip.className='session-source-chip';
       chip.textContent=chipLabel;
-      chip.dataset.sourceKey=_sourceKeyForSession(s)||'cli';
+      chip.dataset.sourceKey=_sourceKeyForSession(s)||String(s.raw_source||s.source_tag||s.source_label||'webui').toLowerCase();
       titleRow.appendChild(chip);
     }
     titleRow.appendChild(ts);
@@ -7998,7 +8314,7 @@ function renderSessionListFromCache(){
       const modelMeta=_formatSessionModelWithGateway(s);
       if(modelMeta) metaBits.push(modelMeta);
       const sourceLabel=_getChannelLabel(s);
-      if(sourceLabel&&(s.is_cli_session||_isMessagingSession(s))) metaBits.push(sourceLabel);
+      if(sourceLabel) metaBits.push(sourceLabel);
       if(readOnly) metaBits.push('read-only');
       if(_showAllProfiles&&s.profile) metaBits.push(s.profile);
       const meta=document.createElement('div');
@@ -8006,6 +8322,11 @@ function renderSessionListFromCache(){
       meta.textContent=metaBits.join(' · ');
       sessionText.appendChild(meta);
     }
+    const routeMeta=document.createElement('div');
+    routeMeta.className='session-route-meta';
+    routeMeta.textContent=`profile: ${_displaySessionMetaValue(s.profile)} · chat: ${_displaySessionMetaValue(s.chat_id)} · thread: ${_displaySessionMetaValue(s.thread_id)} · active: ${_displaySessionMetaValue(_activeSessionSourceLabel(s))}`;
+    routeMeta.title=`profile=${_displaySessionMetaValue(s.profile)} | chat=${_displaySessionMetaValue(s.chat_id)} | thread=${_displaySessionMetaValue(s.thread_id)} | active=${_displaySessionMetaValue(_activeSessionSourceLabel(s))}`;
+    sessionText.appendChild(routeMeta);
     const contentPreview=titleMatched?'':_sessionSearchContentPreview(s,searchQueryRaw);
     if(contentPreview){
       const preview=document.createElement('div');

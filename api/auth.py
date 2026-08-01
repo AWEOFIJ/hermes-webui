@@ -913,34 +913,80 @@ def _session_token_from_cookie_value(cookie_value: str) -> str | None:
     return token or None
 
 
-def sign_profile_cookie_value(profile_name: str, session_cookie_value: str | None) -> str:
+_TAB_ID_RE = __import__('re').compile(r'^[\w-]{8,128}$')
+
+
+def _normalize_tab_id(tab_id: str | None) -> str | None:
+    """Return ``tab_id`` if it is a syntactically valid per-tab identifier.
+
+    The shape is the same as the UUID-ish value the frontend stores in
+    ``sessionStorage`` under ``hermes-webui-tab-id``. Invalid inputs (None,
+    empty, too short, surprising chars) collapse to ``None`` so the caller
+    never has to reason about it.
+    """
+    if not tab_id:
+        return None
+    tab_id = tab_id.strip()
+    if not _TAB_ID_RE.fullmatch(tab_id):
+        return None
+    return tab_id
+
+
+def sign_profile_cookie_value(profile_name: str, session_cookie_value: str | None, tab_id: str | None = None) -> str:
     """Return a profile cookie value authenticated for one WebUI session.
 
     The active-profile cookie is client-controlled, so when auth is enabled it
     must not be trusted as a bare profile name. Binding the selected profile to
     the HttpOnly session token prevents a client from forging
     ``hermes_profile=<other-profile>`` and bypassing profile visibility guards.
+
+    Cookie layout: ``profile_name.tab_id.sig`` (3 segments). The ``tab_id`` is
+    the per-tab-browser identifier that the frontend stores in ``sessionStorage``
+    (UUID-ish). The browser cookie store is shared across tabs by RFC 6265, so
+    binding the signature to a tab_id keeps two tabs on different profiles from
+    silently overwriting each other. A missing/invalid ``tab_id`` raises so we
+    never produce a legacy 2-segment cookie that would skip this protection.
     """
     if not session_cookie_value or not verify_session(session_cookie_value):
         raise ValueError("active auth session is required to sign profile cookie")
     token = _session_token_from_cookie_value(session_cookie_value)
     if not token:
         raise ValueError("active auth session is required to sign profile cookie")
+    tab_id_norm = _normalize_tab_id(tab_id)
+    if not tab_id_norm:
+        raise ValueError("X-Hermes-Tab-Id is required to sign profile cookie")
     sig = hmac.new(
         _signing_key(),
-        f"profile:{token}:{profile_name}".encode(),
+        f"profile:{token}:{tab_id_norm}:{profile_name}".encode(),
         hashlib.sha256,
     ).hexdigest()
-    return f"{profile_name}.{sig}"
+    return f"{profile_name}.{tab_id_norm}.{sig}"
 
 
-def verify_profile_cookie_value(cookie_value: str, session_cookie_value: str | None) -> str | None:
-    """Verify a session-bound profile cookie and return its profile name."""
+def verify_profile_cookie_value(cookie_value: str, session_cookie_value: str | None, tab_id: str | None = None) -> str | None:
+    """Verify a session-bound profile cookie and return its profile name.
+
+    Strict tab binding: a 2-segment legacy cookie is rejected outright. The
+    expected signature is ``HMAC(secret, "profile:{token}:{tab_id}:{profile}")``
+    so the cookie only validates when the request's ``X-Hermes-Tab-Id`` header
+    (or the ``tab_id`` query arg fallback for SSE) matches the tab_id that was
+    embedded at sign time.
+    """
     if not cookie_value or '.' not in cookie_value:
         return None
     if not session_cookie_value or not verify_session(session_cookie_value):
         return None
-    profile_name, sig = cookie_value.rsplit('.', 1)
+    parts = cookie_value.split('.')
+    # Legacy 2-segment cookies (profile.sig) are no longer accepted. They predate
+    # the per-tab binding fix and would let two tabs silently overwrite each other.
+    if len(parts) != 3:
+        return None
+    profile_name, cookie_tab_id, sig = parts
+    incoming_tab_id = _normalize_tab_id(tab_id)
+    if not incoming_tab_id:
+        return None
+    if not hmac.compare_digest(cookie_tab_id, incoming_tab_id):
+        return None
     token = _session_token_from_cookie_value(session_cookie_value)
     if not profile_name or not token or not sig:
         return None
@@ -952,7 +998,7 @@ def verify_profile_cookie_value(cookie_value: str, session_cookie_value: str | N
         return None
     expected = hmac.new(
         _signing_key(),
-        f"profile:{token}:{profile_name}".encode(),
+        f"profile:{token}:{cookie_tab_id}:{profile_name}".encode(),
         hashlib.sha256,
     ).hexdigest()
     if hmac.compare_digest(str(sig), expected):

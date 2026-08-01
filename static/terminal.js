@@ -406,6 +406,7 @@ function _connectTerminalOutput(){
   }
   const url=new URL('api/terminal/output',document.baseURI||location.href);
   url.searchParams.set('session_id',sid);
+  if(window._hermesTabQs){ url.search += (url.search ? '&' : '?') + window._hermesTabQs().slice(1); }
   const source=new EventSource(url.href,{withCredentials:true});
   TERMINAL_UI.source=source;
   source.addEventListener('output',ev=>{

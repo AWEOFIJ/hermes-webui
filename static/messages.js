@@ -2546,7 +2546,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
           if(st.active){
             setComposerStatus('Reconnected');
-            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}${_hermesTabQs()}`,document.baseURI||location.href).href,{withCredentials:true}));
             return;
           }
         }
@@ -6457,12 +6457,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
             if(st&&st.active){
               setComposerStatus('Reconnected');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}${_hermesTabQs()}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
             if(st&&st.replay_available){
               setComposerStatus('Restoring stream…');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}${_hermesTabQs()}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
           }catch(_){
@@ -6888,7 +6888,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     }
     const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
-    _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
+    _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}${_hermesTabQs()}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();
 
 }
@@ -7748,7 +7748,8 @@ function startSessionStream(sid) {
       }
     } catch (_) {}
     const _streamUrl = 'api/session/stream?session_id=' + encodeURIComponent(sid)
-      + (_knownCount !== '' ? '&known_count=' + encodeURIComponent(_knownCount) : '');
+      + (_knownCount !== '' ? '&known_count=' + encodeURIComponent(_knownCount) : '')
+      + window._hermesTabQs();
     const es = new EventSource(_apiUrl(_streamUrl));
     _sessionEventSource = es;
     es.addEventListener('initial', () => { /* connection confirmed */ });
@@ -8769,7 +8770,7 @@ function sendBrowserNotification(title,body,options={}){
 
 function attachBtwStream(parentSid, streamId, question){
   if(!parentSid||!streamId) return;
-  const src=new EventSource(new URL('api/chat/stream?stream_id='+encodeURIComponent(streamId), document.baseURI||location.href).href);
+  const src=new EventSource(new URL('api/chat/stream?stream_id='+encodeURIComponent(streamId)+window._hermesTabQs(), document.baseURI||location.href).href);
   let answer='';
   let btwRow=null;
   let _streamDone=false;

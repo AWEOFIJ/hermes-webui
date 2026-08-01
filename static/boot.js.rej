@@ -1,0 +1,23 @@
+diff a/static/boot.js b/static/boot.js	(rejected hunks)
+@@ -31,7 +70,9 @@ async function cancelStream(reason){
+   }
+   let respBody=null;
+   try{
+-    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
++    const _tabId = (typeof window!=='undefined' && window.HERMES_TAB_ID) ? window.HERMES_TAB_ID : '';
++    const _tabHeader = _tabId ? {'X-Hermes-Tab-Id': _tabId} : {};
++    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}&tab_id=${encodeURIComponent(_tabId)}`,document.baseURI||location.href).href,{credentials:'include',headers:_tabHeader});
+     try{respBody=await r.json();}catch(_){}
+   }catch(e){
+     if(typeof console !== 'undefined' && console.warn){
+@@ -71,7 +112,9 @@ async function cancelSessionStream(session){
+     console.info('[stream] cancel requested', {reason:'sidebar-stop', streamId, sessionId:sid});
+   }
+   try{
+-    await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
++    const _tabId = (typeof window!=='undefined' && window.HERMES_TAB_ID) ? window.HERMES_TAB_ID : '';
++    const _tabHeader = _tabId ? {'X-Hermes-Tab-Id': _tabId} : {};
++    await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}&tab_id=${encodeURIComponent(_tabId)}`,document.baseURI||location.href).href,{credentials:'include',headers:_tabHeader});
+   }catch(e){/* close local stream; keep UI state honest below */}
+   if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
+   session.active_stream_id=null;

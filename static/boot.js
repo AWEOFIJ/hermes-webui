@@ -8,8 +8,47 @@
   try {
     var _stopChan = new BroadcastChannel('hermes-webui-shutdown');
     _stopChan.onmessage = function() { _showServerStopped(); };
-  } catch(_) {}
+  } catch(_){}
 })();
+
+// Per-tab identifier used to bind the active-profile cookie to this browser
+// tab. The browser cookie store is shared across tabs by RFC 6265, so two tabs
+// on the same origin would otherwise silently overwrite each other's profile
+// selection. sessionStorage is naturally per-tab-by-window, so this UUID lives
+// for the lifetime of the tab (survives reloads, dies when the tab closes).
+// The server signs hermes_profile with this exact value (api/auth.py), so a
+// cookie minted by tab A will not validate against a request from tab B.
+window.HERMES_TAB_ID = (function _getOrCreateTabId(){
+  var KEY = 'hermes-webui-tab-id';
+  function _new() {
+    try {
+      if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+    } catch(_) {}
+    return 'tab-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  }
+  try {
+    var existing = sessionStorage.getItem(KEY);
+    if (existing && /^[\w-]{8,128}$/.test(existing)) return existing;
+    var fresh = _new();
+    sessionStorage.setItem(KEY, fresh);
+    return fresh;
+  } catch(_) {
+    // sessionStorage unavailable (private mode, disabled): generate an ephemeral
+    // per-page-load ID. Two tabs in this mode will still trample each other
+    // (degraded behavior, matches the legacy 2-segment cookie).
+    return _new();
+  }
+})();
+
+// Helper for EventSource callers — the browser EventSource constructor cannot
+// set custom request headers, so the per-tab identifier is passed via the
+// query string. The server reads it in _tab_id_from_request() as a fallback
+// when X-Hermes-Tab-Id is missing. Returned as "&tab_id=..." (empty string
+// when unavailable) so it can be concatenated into any URL.
+window._hermesTabQs = function() {
+  var id = (typeof window !== 'undefined' && window.HERMES_TAB_ID) ? window.HERMES_TAB_ID : '';
+  return id ? '&tab_id=' + encodeURIComponent(id) : '';
+};
 
 // cancelStream: stop the active chat stream.
 // See docs/rfcs/webui-run-state-consistency-contract.md (Invariants #2, #4)

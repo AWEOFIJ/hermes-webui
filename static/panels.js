@@ -2769,7 +2769,7 @@ function _kanbanStartEventStream(){
   // login change, etc.).
   if (_kanbanEventSource) { try { if(_kanbanEventSource.readyState!==2)_kanbanEventSource.close(); } catch(_) {} _kanbanEventSource = null; }
   const since = Number(_kanbanLatestEventId || 0);
-  let url = '/api/kanban/events/stream' + _kanbanBoardQuery({since: since});
+  let url = '/api/kanban/events/stream' + _kanbanBoardQuery({since: since}) + window._hermesTabQs();
   let es;
   try {
     es = new EventSource(url);

@@ -6218,7 +6218,7 @@ function ensureSessionEventsSSE(){
   if(_sessionEventsSSE) return;
   try{
     // Same-origin relative URL preserves subpath mounts and normal WebUI cookies.
-    _sessionEventsSSE = new EventSource('api/sessions/events');
+    _sessionEventsSSE = new EventSource('api/sessions/events' + window._hermesTabQs());
     _sessionEventsSSE.onopen = () => {
       _sessionEventsReconnectAttempt = 0;
       if(!_sessionEventsNeedsRefreshOnOpen) return;
@@ -6368,7 +6368,7 @@ function startGatewaySSE(){
   // saves connection pool slots (#4151).
   if(_sidebarSseBackgrounded()) return;
   try{
-    _gatewaySSE = new EventSource('api/sessions/gateway/stream');
+    _gatewaySSE = new EventSource('api/sessions/gateway/stream' + window._hermesTabQs());
     _gatewaySSE.addEventListener('sessions_changed', (ev) => {
       try{
         const data = JSON.parse(ev.data);

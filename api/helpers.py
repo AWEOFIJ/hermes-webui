@@ -1104,6 +1104,89 @@ def get_profile_cookie_name() -> str:
     return PROFILE_COOKIE_NAME
 
 
+def _encode_profile_cookie_no_auth(name: str, tab_id: str | None) -> str:
+    """Encode the profile cookie value when auth is disabled.
+
+    Layout: ``profile_name.tab_id`` (2 segments when tab_id is present).
+    Embedding the tab_id directly in the cookie value is what stops two tabs
+    on the same origin from silently overwriting each other: the server only
+    accepts the cookie when the request's tab identifier matches the one
+    baked into the cookie, so a cookie minted by tab A cannot validate
+    against a request from tab B.
+
+    No HMAC: this path is for no-auth deployments where the cookie is treated
+    as a UI preference, not as an authz boundary. The integrity here is
+    enforced by the fact that a tab can only produce a cookie for its own
+    tab_id (the server reads it from the request, not from the cookie).
+    Missing/empty tab_id falls back to a plain ``profile_name`` value — this
+    is the legacy no-auth behavior and is still accepted on read so existing
+    clients keep working.
+    """
+    from api.auth import _normalize_tab_id
+    tab_id_norm = _normalize_tab_id(tab_id)
+    if tab_id_norm:
+        return f"{name}.{tab_id_norm}"
+    return name
+
+
+def _decode_profile_cookie_no_auth(cookie_value: str, tab_id: str | None) -> str | None:
+    """Decode a no-auth profile cookie value, validating the embedded tab_id.
+
+    Returns the profile name when the cookie is acceptable, ``None`` when it
+    must be rejected. A 2-segment cookie is only accepted when the request's
+    tab identifier matches the embedded ``tab_id``; a 1-segment cookie is
+    accepted as the legacy plain name (no tab binding).
+    """
+    import hmac as _hmac
+    if not cookie_value:
+        return None
+    parts = cookie_value.split('.')
+    if len(parts) == 1:
+        return parts[0] or None
+    if len(parts) == 2:
+        from api.auth import _normalize_tab_id
+        cookie_tab_id, incoming_tab_id = parts[1], _normalize_tab_id(tab_id)
+        if not incoming_tab_id or not _hmac.compare_digest(cookie_tab_id, incoming_tab_id):
+            return None
+        return parts[0] or None
+    # A 3-segment cookie in no-auth mode is unexpected — it has the auth shape
+    # but no signature. Reject so a stray reload into a confused state can't
+    # accept a value the verifier never agreed to.
+    return None
+
+
+def _tab_id_from_request(handler) -> str | None:
+    """Return the per-tab identifier from the request.
+
+    Primary source: ``X-Hermes-Tab-Id`` request header. Fallback: ``tab_id``
+    query-string argument, which exists for ``EventSource`` callers that the
+    browser cannot decorate with custom headers. The value is normalized
+    via ``_normalize_tab_id`` (in api.auth), so an invalid value collapses to
+    ``None`` and the profile cookie is rejected — fail-closed.
+    """
+    if handler is None:
+        return None
+    header_val = handler.headers.get('X-Hermes-Tab-Id') if hasattr(handler, 'headers') else None
+    if header_val and header_val.strip():
+        return header_val
+    # Fallback for SSE (EventSource has no header API). The query string is set
+    # by the frontend in static/workspace.js + static/boot.js when it opens an
+    # EventSource. We only consult the query string when the header is missing
+    # so that normal fetch traffic still goes through the header path.
+    try:
+        from urllib.parse import urlparse, parse_qs
+        path = getattr(handler, 'path', '') or ''
+        qs = urlparse(path).query
+        if not qs:
+            return None
+        q = parse_qs(qs).get('tab_id', [])
+        if q:
+            return q[0]
+    except Exception:
+        return None
+    return None
+
+
 def get_profile_cookie(handler) -> str | None:
     """Extract and authenticate the active-profile cookie value.
 
@@ -1136,18 +1219,26 @@ def get_profile_cookie(handler) -> str | None:
     try:
         from api.auth import is_auth_enabled, parse_cookie, verify_profile_cookie_value
         if is_auth_enabled():
-            val = verify_profile_cookie_value(raw_val, parse_cookie(handler))
+            tab_id = _tab_id_from_request(handler)
+            val = verify_profile_cookie_value(raw_val, parse_cookie(handler), tab_id=tab_id)
             return val if val and _valid_profile_name(val) else None
     except Exception:
         logger.warning("Failed to verify active profile cookie", exc_info=True)
         return None
 
     # No-auth mode: the cookie is a per-browser UI preference, not an authz
-    # boundary, so retain the legacy plain profile-name format.
-    return raw_val if _valid_profile_name(raw_val) else None
+    # boundary. We still bind it to a per-tab identifier so two tabs on the same
+    # origin cannot silently overwrite each other's profile selection. The cookie
+    # value is either "profile_name" (legacy, no tab binding) or
+    # "profile_name.tab_id" (new). Plain "profile_name" is accepted without a
+    # tab_id check so old clients keep working; a 2-segment cookie is rejected
+    # unless the request's tab_id matches the embedded one.
+    tab_id = _tab_id_from_request(handler)
+    decoded = _decode_profile_cookie_no_auth(raw_val, tab_id)
+    return decoded if decoded and _valid_profile_name(decoded) else None
 
 
-def build_profile_cookie(name: str, handler=None, *, session_cookie_value: str | None = None) -> str:
+def build_profile_cookie(name: str, handler=None, *, session_cookie_value: str | None = None, tab_id: str | None = None) -> str:
     """Build a Set-Cookie header value for the active-profile cookie.
 
     Always persist the selected profile in the cookie, including 'default'.
@@ -1158,6 +1249,11 @@ def build_profile_cookie(name: str, handler=None, *, session_cookie_value: str |
     Set HttpOnly because the UI reads the active profile from
     /api/profile/active JSON and does not need to access this cookie via
     document.cookie.
+
+    When auth is enabled, the cookie is signed with a per-tab identifier
+    (``X-Hermes-Tab-Id`` header, or ``tab_id`` query arg fallback for SSE).
+    The caller should pass ``tab_id`` explicitly; if it is missing we'll
+    resolve it from the handler so the call site doesn't have to.
     """
     import http.cookies as _hc
     cookie = _hc.SimpleCookie()
@@ -1175,21 +1271,24 @@ def build_profile_cookie(name: str, handler=None, *, session_cookie_value: str |
     if _auth_on and handler is None:
         if session_cookie_value is None:
             raise RuntimeError("build_profile_cookie requires a request handler when auth is enabled (to bind the profile cookie to the session)")
-    if session_cookie_value is not None:
+    # Resolve tab_id once — explicit kwargs win, otherwise pull from the handler.
+    if tab_id is None and handler is not None:
+        tab_id = _tab_id_from_request(handler)
+    if _auth_on:
+        if session_cookie_value is None and handler is not None:
+            session_cookie_value = parse_cookie(handler)
+        if not session_cookie_value:
+            raise RuntimeError("cannot sign active profile cookie without an auth session")
         try:
             from api.auth import sign_profile_cookie_value
-            value = sign_profile_cookie_value(name, session_cookie_value)
+            value = sign_profile_cookie_value(name, session_cookie_value, tab_id=tab_id)
         except Exception as exc:
             logger.warning("Failed to sign active profile cookie", exc_info=True)
             raise RuntimeError("could not sign active profile cookie") from exc
-    elif handler is not None:
-        try:
-            from api.auth import is_auth_enabled, parse_cookie, sign_profile_cookie_value
-            if is_auth_enabled():
-                value = sign_profile_cookie_value(name, parse_cookie(handler))
-        except Exception as exc:
-            logger.warning("Failed to sign active profile cookie", exc_info=True)
-            raise RuntimeError("could not sign active profile cookie") from exc
+    else:
+        # No-auth deployments: bake the tab_id directly into the cookie value
+        # so two tabs on the same origin stop overwriting each other's profile.
+        value = _encode_profile_cookie_no_auth(name, tab_id)
     cookie[cookie_name] = value
     cookie[cookie_name]['path'] = '/'
     cookie[cookie_name]['httponly'] = True

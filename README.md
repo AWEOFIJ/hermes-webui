@@ -21,8 +21,9 @@ Beauty WebUI adds personal UX improvements for long-running Hermes operations:
 
 ### Branch and release policy
 
-- [`master`](https://github.com/AWEOFIJ/hermes-webui/tree/master) remains the
-  fork's default, upstream-facing branch.
+- [`master`](https://github.com/AWEOFIJ/hermes-webui/tree/master) is the
+  default branch shown on GitHub; it tracks upstream 1:1 without the Beauty
+  customizations.
 - [`beauty`](https://github.com/AWEOFIJ/hermes-webui/tree/beauty) contains the
   personal customized version.
 - Stable Beauty releases use tags such as

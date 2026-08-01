@@ -1276,6 +1276,7 @@ def build_profile_cookie(name: str, handler=None, *, session_cookie_value: str |
         tab_id = _tab_id_from_request(handler)
     if _auth_on:
         if session_cookie_value is None and handler is not None:
+            from api.auth import parse_cookie
             session_cookie_value = parse_cookie(handler)
         if not session_cookie_value:
             raise RuntimeError("cannot sign active profile cookie without an auth session")

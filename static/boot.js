@@ -44,10 +44,19 @@ window.HERMES_TAB_ID = (function _getOrCreateTabId(){
 // set custom request headers, so the per-tab identifier is passed via the
 // query string. The server reads it in _tab_id_from_request() as a fallback
 // when X-Hermes-Tab-Id is missing. Returned as "&tab_id=..." (empty string
-// when unavailable) so it can be concatenated into any URL.
+// when unavailable) so it can be concatenated into any URL that already
+// has a query string.
 window._hermesTabQs = function() {
   var id = (typeof window !== 'undefined' && window.HERMES_TAB_ID) ? window.HERMES_TAB_ID : '';
   return id ? '&tab_id=' + encodeURIComponent(id) : '';
+};
+
+// Variant for EventSource URLs that have NO query string yet. Returns
+// "?tab_id=..." instead of "&tab_id=..." so the concatenation produces a
+// valid URL. Use with EventSource callers whose base URL is a bare path.
+window._hermesTabQsFirst = function() {
+  var id = (typeof window !== 'undefined' && window.HERMES_TAB_ID) ? window.HERMES_TAB_ID : '';
+  return id ? '?tab_id=' + encodeURIComponent(id) : '';
 };
 
 // cancelStream: stop the active chat stream.

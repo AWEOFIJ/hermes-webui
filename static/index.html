@@ -50,7 +50,38 @@
       var headers=new Headers(opts.headers!==undefined?opts.headers:((input&&input.headers)||{}));
       if(!headers.has('X-Hermes-CSRF-Token'))headers.set('X-Hermes-CSRF-Token',token);
       opts.headers=headers;
-      return originalFetch(input,opts);
+      return originalFetch(input,opts).then(function(resp){
+        // Auto-refresh CSRF token on 403 "Session expired" so the user isn't
+        // forced to reload the page on stale-token races (e.g. opening a new
+        // tab right after switching profiles, where the HTML snapshot baked
+        // into JS may still hold the previous server's token). The fresh
+        // token comes from re-fetching the index page (the only place tokens
+        // are minted) and parsing the same __HERMES_CONFIG__ block.
+        if(resp.status===403 && !opts.__hermesRetried){
+          try{
+            return resp.clone().json().then(function(body){
+              if(body && typeof body.error==='string' && body.error.indexOf('Session expired')!==-1){
+                opts.__hermesRetried=true;
+                return originalFetch('/',{credentials:'include',headers:{Accept:'text/html'}})
+                  .then(function(r){return r.text();})
+                  .then(function(text){
+                    var m=text.match(/csrfToken[\s:]+['"]([^'"]+)['"]/);
+                    if(m && m[1]){
+                      token=m[1];
+                      window.__HERMES_CONFIG__=window.__HERMES_CONFIG__||{};
+                      window.__HERMES_CONFIG__.csrfToken=token;
+                      headers.set('X-Hermes-CSRF-Token',token);
+                      opts.headers=headers;
+                    }
+                    return originalFetch(input,opts);
+                  });
+              }
+              return resp;
+            }).catch(function(){return resp;});
+          }catch(_){return resp;}
+        }
+        return resp;
+      });
     }
     return originalFetch(input,init);
   };

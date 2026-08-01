@@ -4067,8 +4067,16 @@ function _restoreShowAllProfiles(){
 }
 
 function _setShowAllProfiles(enabled){
-  _showAllProfiles=!!enabled;
+  const next=!!enabled;
+  const changed=_showAllProfiles!==next;
+  _showAllProfiles=next;
   try{ localStorage.setItem(SHOW_ALL_PROFILES_STORAGE_KEY,_showAllProfiles?'1':'0'); }catch(_e){}
+  // Leaving all-profiles mode: drop the cached aggregate so the next paint
+  // cannot show other-profile rows from memory before the scoped refetch lands.
+  if(changed && !_showAllProfiles){
+    _allSessions=[];
+    _otherProfileCount=0;
+  }
 }
 
 _restoreShowAllProfiles();
@@ -7591,6 +7599,16 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   const activePlatformFilter=_isPlatformFilter(_sessionSourceFilter)?_sessionSourceFilter:null;
   for(const s of allMatched){
     if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
+    // Profile scope (defense-in-depth): when "active profile only" is on, drop
+    // rows that do not belong to S.activeProfile. The server already scopes
+    // /api/sessions without ?all_profiles=1, but a stale in-memory payload
+    // (from a prior show-all fetch, or a race after profile switch) can still
+    // leak other profiles into the sidebar. Keep the list honest to the chip.
+    if(!_showAllProfiles){
+      const activeProfile=(typeof S!=='undefined'&&S.activeProfile)||'default';
+      const sessionProfile=(typeof s.profile==='string'&&s.profile.trim())?s.profile.trim():'default';
+      if(!_profileMatchesActiveProfile(sessionProfile, activeProfile)) continue;
+    }
     const isCli=_isCliSession(s);
     if(isCli) cliSessionCount++;
     if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;

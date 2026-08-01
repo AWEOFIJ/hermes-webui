@@ -7014,6 +7014,12 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    // Switching profiles always lands in active-profile-only mode. Leaving
+    // "show all profiles" sticky across a switch would mix the destination
+    // profile's chip with a leftover all-profiles payload and make the chat
+    // list look like it ignored the profile change. User can still opt back
+    // into "Show N from other profiles" after the switch settles.
+    if (typeof _setShowAllProfiles === 'function') _setShowAllProfiles(false);
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }

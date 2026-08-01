@@ -4060,17 +4060,21 @@ async function _refreshPlatformCounts(){
 window._refreshPlatformCounts=_refreshPlatformCounts;
 
 function _restoreShowAllProfiles(){
-  try{
-    const raw=localStorage.getItem(SHOW_ALL_PROFILES_STORAGE_KEY);
-    _showAllProfiles = raw === '1' || raw === 'true';
-  }catch(_e){ _showAllProfiles = false; }
+  // Always boot in active-profile-only mode. The chat list is profile-scoped by
+  // default so the chip (default/op_erp/...) matches the rows below it. Users can
+  // still click "Show N from other profiles" for a temporary aggregate view, but
+  // that choice is session-local and must not sticky across reloads — sticky
+  // show-all was the main reason a default chip still listed op_erp / op_operator.
+  _showAllProfiles = false;
+  try{ localStorage.removeItem(SHOW_ALL_PROFILES_STORAGE_KEY); }catch(_e){}
 }
 
 function _setShowAllProfiles(enabled){
   const next=!!enabled;
   const changed=_showAllProfiles!==next;
   _showAllProfiles=next;
-  try{ localStorage.setItem(SHOW_ALL_PROFILES_STORAGE_KEY,_showAllProfiles?'1':'0'); }catch(_e){}
+  // Do not persist show-all. Active-profile-only is the durable default.
+  try{ localStorage.removeItem(SHOW_ALL_PROFILES_STORAGE_KEY); }catch(_e){}
   // Leaving all-profiles mode: drop the cached aggregate so the next paint
   // cannot show other-profile rows from memory before the scoped refetch lands.
   if(changed && !_showAllProfiles){

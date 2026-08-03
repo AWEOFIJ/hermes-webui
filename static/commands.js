@@ -864,7 +864,7 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
       S.messages=data.session.messages||[];
       S.toolCalls=data.session.tool_calls||[];
       clearLiveToolCards();
-      try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+      if(typeof _writeTabActiveSessionId==='function')_writeTabActiveSessionId(S.session.session_id);else try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
       if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
       syncTopbar();
       renderMessages();

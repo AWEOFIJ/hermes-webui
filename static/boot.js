@@ -3648,7 +3648,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
   try{ if(typeof _refreshProfileOnlineStatus==='function') _refreshProfileOnlineStatus(); }catch(_){}
   const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;
-  const _savedLocalBeforeProfileSwitch=localStorage.getItem('hermes-webui-session');
+  const _savedTabBeforeProfileSwitch=(typeof _readTabActiveSessionId==='function')?_readTabActiveSessionId():null;
   const _profileSwitchProfileBefore=S.activeProfile||'default';
   const _profileSwitchIsDefaultBefore=!!S.activeProfileIsDefault;
   let _profileSwitchCompleted=false;
@@ -3789,19 +3789,28 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _profileQueryBlocksSavedLocal=_profileQueryBlocksSavedLocalRestore(profileIntent, urlSession);
   if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){
     try{
-      if(localStorage.getItem('hermes-webui-session')===_savedLocalBeforeProfileSwitch) localStorage.removeItem('hermes-webui-session');
+      const cur=(typeof _readTabActiveSessionId==='function')?_readTabActiveSessionId():null;
+      if(cur===_savedTabBeforeProfileSwitch){
+        if(typeof _writeTabActiveSessionId==='function') _writeTabActiveSessionId(null);
+      }
     }catch(_){}
   }
-  const savedLocal=localStorage.getItem('hermes-webui-session');
-  const saved=urlSession||savedLocal;
+  // Multi-tab contract: each tab owns its conversation.
+  // - URL /session/<id> wins (deep link / same-tab history)
+  // - else this tab's sessionStorage id (reload keeps the same chat)
+  // - NEVER restore localStorage hermes-webui-session on bare `/` — that key is
+  //   shared across tabs and would make every new tab open the previous tab's id.
+  const savedTab=(typeof _readTabActiveSessionId==='function')?_readTabActiveSessionId():null;
+  const saved=urlSession||savedTab;
   if(saved){
     try{
-      const savedSidebarOnlyState=(!urlSession&&savedLocal)
-        ? await _savedSessionSidebarOnlyState(savedLocal)
+      const savedSidebarOnlyState=(!urlSession&&savedTab)
+        ? await _savedSessionSidebarOnlyState(savedTab)
         : null;
       if(savedSidebarOnlyState&&savedSidebarOnlyState.sidebarOnly){
         if(savedSidebarOnlyState.archived){
-          try{localStorage.removeItem('hermes-webui-session');}catch(_){}
+          if(typeof _writeTabActiveSessionId==='function')_writeTabActiveSessionId(null);
+          else try{localStorage.removeItem('hermes-webui-session');}catch(_){}
         }
         S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
         S._bootReady=true;
@@ -3810,7 +3819,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
         return;
       }
-      if(_rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent)){
+      if(_rootPrefillNeedsFreshComposer(urlSession, savedTab, prefillIntent)){
         S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
         S._bootReady=true;
         const _ephPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
@@ -3870,9 +3879,34 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       }
       S._bootReady=true;
       syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);await _finalizeComposerPrefillOnBoot(prefillIntent);return;}
-    catch(e){localStorage.removeItem('hermes-webui-session');}
+    catch(e){
+      if(typeof _writeTabActiveSessionId==='function')_writeTabActiveSessionId(null);
+      else try{localStorage.removeItem('hermes-webui-session');}catch(_){}
+    }
   }
-  // no saved session - show empty state, wait for user to hit +
+  // Fresh tab (no URL session, no tab-scoped session): default profile + new id.
+  // Opening another browser tab must not resume the previous tab's conversation
+  // or stick on a non-default profile cookie from a sibling tab.
+  try{
+    if((S.activeProfile||'default')!=='default' && typeof switchToProfile==='function'){
+      await switchToProfile('default');
+    }
+  }catch(e){ console.warn('[boot] fresh-tab default profile switch failed', e); }
+  try{
+    if(typeof newSession==='function'){
+      await newSession(true, {worktree:false});
+      if(S.session){
+        try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
+      }
+      S._bootReady=true;
+      syncTopbar();syncWorkspacePanelState();
+      await renderSessionList();
+      await _finalizeComposerPrefillOnBoot(prefillIntent);
+      if(typeof startGatewaySSE==='function')startGatewaySSE();
+      return;
+    }
+  }catch(e){ console.warn('[boot] fresh-tab newSession failed', e); }
+  // Fallback empty state if newSession is unavailable/failed
   S._bootReady=true;
   syncTopbar();
   // Restore panel pref so the workspace panel stays visible on a fresh load if the

@@ -1104,24 +1104,97 @@ def get_profile_cookie_name() -> str:
     return PROFILE_COOKIE_NAME
 
 
+# Multi-tab profile cookie format (RFC 6265 cookies are shared across tabs).
+# Prefix mt1. then tab_id=entry pairs joined by "|":
+#   mt1.<tabA>=<entryA>|<tabB>=<entryB>
+# entry is profile.tab.sig (auth) or profile.tab (no-auth). Upserting one tab
+# must not erase other tabs' slots — that was the "new tab breaks old tab" bug.
+_PROFILE_COOKIE_MULTI_PREFIX = "mt1."
+_PROFILE_COOKIE_MULTI_MAX_TABS = 16
+
+
+def _parse_profile_cookie_map(raw_val: str) -> dict[str, str]:
+    """Parse hermes_profile cookie into {tab_id: entry} (insertion-ordered)."""
+    if not raw_val:
+        return {}
+    if raw_val.startswith(_PROFILE_COOKIE_MULTI_PREFIX):
+        body = raw_val[len(_PROFILE_COOKIE_MULTI_PREFIX):]
+        out: dict[str, str] = {}
+        if not body:
+            return out
+        for part in body.split("|"):
+            if not part or "=" not in part:
+                continue
+            tid, entry = part.split("=", 1)
+            tid = (tid or "").strip()
+            entry = (entry or "").strip()
+            if tid and entry:
+                out[tid] = entry
+        return out
+    # Legacy single-entry cookies.
+    parts = raw_val.split(".")
+    if len(parts) == 3:
+        # auth: profile.tab_id.sig
+        return {parts[1]: raw_val} if parts[1] else {"": raw_val}
+    if len(parts) == 2:
+        # no-auth profile.tab_id OR legacy profile.sig — prefer tab slot when
+        # second segment looks like a tab id; else legacy unscoped entry.
+        from api.auth import _normalize_tab_id
+        if _normalize_tab_id(parts[1]):
+            return {parts[1]: raw_val}
+        return {"": raw_val}
+    return {"": raw_val}
+
+
+def _format_profile_cookie_map(tab_map: dict[str, str]) -> str:
+    """Serialize {tab_id: entry}, keeping the most recent N tab slots."""
+    items = [(t, e) for t, e in tab_map.items() if t and e]
+    if len(items) > _PROFILE_COOKIE_MULTI_MAX_TABS:
+        items = items[-_PROFILE_COOKIE_MULTI_MAX_TABS:]
+    if not items:
+        return ""
+    return _PROFILE_COOKIE_MULTI_PREFIX + "|".join(f"{t}={e}" for t, e in items)
+
+
+def _entry_for_tab(raw_val: str, tab_id: str | None) -> str | None:
+    """Pick the cookie entry that belongs to tab_id (or legacy unscoped)."""
+    if not raw_val:
+        return None
+    from api.auth import _normalize_tab_id
+    tab_norm = _normalize_tab_id(tab_id)
+    tab_map = _parse_profile_cookie_map(raw_val)
+    if tab_norm and tab_norm in tab_map:
+        return tab_map[tab_norm]
+    # Legacy unscoped single value (no tab binding).
+    if "" in tab_map and not raw_val.startswith(_PROFILE_COOKIE_MULTI_PREFIX):
+        return tab_map[""]
+    # Exact legacy single entry still sitting as sole map value.
+    if not raw_val.startswith(_PROFILE_COOKIE_MULTI_PREFIX) and len(tab_map) == 1:
+        only_tid, only_entry = next(iter(tab_map.items()))
+        if not tab_norm or only_tid == tab_norm or only_tid == "":
+            return only_entry
+    return None
+
+
+def _merge_tab_profile_entry(existing_raw: str | None, tab_id: str | None, entry: str) -> str:
+    """Upsert one tab's entry into the multi-tab cookie value."""
+    from api.auth import _normalize_tab_id
+    tab_norm = _normalize_tab_id(tab_id)
+    if not tab_norm:
+        # No tab id — keep legacy single-entry behavior.
+        return entry
+    tab_map = _parse_profile_cookie_map(existing_raw or "")
+    # Re-insert so this tab becomes the most-recent slot (LRU tail).
+    if tab_norm in tab_map:
+        del tab_map[tab_norm]
+    tab_map[tab_norm] = entry
+    # Drop legacy unscoped slot once any tab-scoped entry exists.
+    tab_map.pop("", None)
+    return _format_profile_cookie_map(tab_map)
+
+
 def _encode_profile_cookie_no_auth(name: str, tab_id: str | None) -> str:
-    """Encode the profile cookie value when auth is disabled.
-
-    Layout: ``profile_name.tab_id`` (2 segments when tab_id is present).
-    Embedding the tab_id directly in the cookie value is what stops two tabs
-    on the same origin from silently overwriting each other: the server only
-    accepts the cookie when the request's tab identifier matches the one
-    baked into the cookie, so a cookie minted by tab A cannot validate
-    against a request from tab B.
-
-    No HMAC: this path is for no-auth deployments where the cookie is treated
-    as a UI preference, not as an authz boundary. The integrity here is
-    enforced by the fact that a tab can only produce a cookie for its own
-    tab_id (the server reads it from the request, not from the cookie).
-    Missing/empty tab_id falls back to a plain ``profile_name`` value — this
-    is the legacy no-auth behavior and is still accepted on read so existing
-    clients keep working.
-    """
+    """Encode a single-tab no-auth entry: ``profile_name.tab_id`` or plain name."""
     from api.auth import _normalize_tab_id
     tab_id_norm = _normalize_tab_id(tab_id)
     if tab_id_norm:
@@ -1130,13 +1203,7 @@ def _encode_profile_cookie_no_auth(name: str, tab_id: str | None) -> str:
 
 
 def _decode_profile_cookie_no_auth(cookie_value: str, tab_id: str | None) -> str | None:
-    """Decode a no-auth profile cookie value, validating the embedded tab_id.
-
-    Returns the profile name when the cookie is acceptable, ``None`` when it
-    must be rejected. A 2-segment cookie is only accepted when the request's
-    tab identifier matches the embedded ``tab_id``; a 1-segment cookie is
-    accepted as the legacy plain name (no tab binding).
-    """
+    """Decode a no-auth profile entry (single entry, not the multi-tab envelope)."""
     import hmac as _hmac
     if not cookie_value:
         return None
@@ -1149,9 +1216,6 @@ def _decode_profile_cookie_no_auth(cookie_value: str, tab_id: str | None) -> str
         if not incoming_tab_id or not _hmac.compare_digest(cookie_tab_id, incoming_tab_id):
             return None
         return parts[0] or None
-    # A 3-segment cookie in no-auth mode is unexpected — it has the auth shape
-    # but no signature. Reject so a stray reload into a confused state can't
-    # accept a value the verifier never agreed to.
     return None
 
 
@@ -1216,25 +1280,21 @@ def get_profile_cookie(handler) -> str | None:
         return val == 'default' or bool(_PROFILE_ID_RE.fullmatch(val))
 
     raw_val = morsel.value
+    tab_id = _tab_id_from_request(handler)
+    entry = _entry_for_tab(raw_val, tab_id)
+    if not entry:
+        return None
     try:
         from api.auth import is_auth_enabled, parse_cookie, verify_profile_cookie_value
         if is_auth_enabled():
-            tab_id = _tab_id_from_request(handler)
-            val = verify_profile_cookie_value(raw_val, parse_cookie(handler), tab_id=tab_id)
+            val = verify_profile_cookie_value(entry, parse_cookie(handler), tab_id=tab_id)
             return val if val and _valid_profile_name(val) else None
     except Exception:
         logger.warning("Failed to verify active profile cookie", exc_info=True)
         return None
 
-    # No-auth mode: the cookie is a per-browser UI preference, not an authz
-    # boundary. We still bind it to a per-tab identifier so two tabs on the same
-    # origin cannot silently overwrite each other's profile selection. The cookie
-    # value is either "profile_name" (legacy, no tab binding) or
-    # "profile_name.tab_id" (new). Plain "profile_name" is accepted without a
-    # tab_id check so old clients keep working; a 2-segment cookie is rejected
-    # unless the request's tab_id matches the embedded one.
-    tab_id = _tab_id_from_request(handler)
-    decoded = _decode_profile_cookie_no_auth(raw_val, tab_id)
+    # No-auth mode: per-tab UI preference (multi-tab map or legacy single entry).
+    decoded = _decode_profile_cookie_no_auth(entry, tab_id)
     return decoded if decoded and _valid_profile_name(decoded) else None
 
 
@@ -1274,6 +1334,21 @@ def build_profile_cookie(name: str, handler=None, *, session_cookie_value: str |
     # Resolve tab_id once — explicit kwargs win, otherwise pull from the handler.
     if tab_id is None and handler is not None:
         tab_id = _tab_id_from_request(handler)
+    # Read any existing multi-tab map so this tab's upsert keeps sibling tabs.
+    existing_raw = None
+    if handler is not None:
+        try:
+            import http.cookies as _hc_read
+            _ch = handler.headers.get('Cookie', '') if hasattr(handler, 'headers') else ''
+            if _ch:
+                _sc = _hc_read.SimpleCookie()
+                _sc.load(_ch)
+                _m = _sc.get(cookie_name)
+                if _m and _m.value:
+                    existing_raw = _m.value
+        except Exception:
+            existing_raw = None
+
     if _auth_on:
         if session_cookie_value is None and handler is not None:
             from api.auth import parse_cookie
@@ -1282,14 +1357,13 @@ def build_profile_cookie(name: str, handler=None, *, session_cookie_value: str |
             raise RuntimeError("cannot sign active profile cookie without an auth session")
         try:
             from api.auth import sign_profile_cookie_value
-            value = sign_profile_cookie_value(name, session_cookie_value, tab_id=tab_id)
+            entry = sign_profile_cookie_value(name, session_cookie_value, tab_id=tab_id)
         except Exception as exc:
             logger.warning("Failed to sign active profile cookie", exc_info=True)
             raise RuntimeError("could not sign active profile cookie") from exc
     else:
-        # No-auth deployments: bake the tab_id directly into the cookie value
-        # so two tabs on the same origin stop overwriting each other's profile.
-        value = _encode_profile_cookie_no_auth(name, tab_id)
+        entry = _encode_profile_cookie_no_auth(name, tab_id)
+    value = _merge_tab_profile_entry(existing_raw, tab_id, entry)
     cookie[cookie_name] = value
     cookie[cookie_name]['path'] = '/'
     cookie[cookie_name]['httponly'] = True

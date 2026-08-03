@@ -1492,7 +1492,7 @@ async function newSession(flash, options={}){
     S.lastUsage={...(data.session.last_usage||{})};
     if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
     if(flash)S.session._flash=true;
-    try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+    if(typeof _writeTabActiveSessionId==='function')_writeTabActiveSessionId(S.session.session_id);else try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);
     if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
     _setSessionViewedCount(S.session.session_id, S.session.message_count || 0);
@@ -1591,7 +1591,7 @@ async function newSession(flash, options={}){
  */
 function _clearStuckSessionOnBoot(sid, currentSid){
   if(!currentSid){
-    try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+    if(typeof _writeTabActiveSessionId==='function')_writeTabActiveSessionId(null);else try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
     try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
   }
 }
@@ -1872,7 +1872,7 @@ async function loadSession(sid){
         // Only the rethrow stays gated on !currentSid: boot rethrows to fall
         // through to empty-state; mid-session there is no boot path to reach.
         if(!currentSid || currentSid===sid){
-          try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+          if(typeof _writeTabActiveSessionId==='function')_writeTabActiveSessionId(null);else try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
           try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
           if (_isCurrentLoad()) _loadingSessionId = null;
           if(!currentSid){
@@ -2028,7 +2028,7 @@ async function loadSession(sid){
     Number(data.session.message_count || 0),
     Number(data.session.last_message_at || data.session.updated_at || 0)
   );
-  try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+  if(typeof _writeTabActiveSessionId==='function')_writeTabActiveSessionId(S.session.session_id);else try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
 
@@ -4244,6 +4244,25 @@ function _optimisticallyRemoveSessionFromList(sid){
   if(_allSessions.length!==before) renderSessionListFromCache();
 }
 
+// Per-tab active session. localStorage is shared across tabs on the same origin,
+// so restoring from it makes every new tab open the other tab's conversation.
+// sessionStorage is tab-scoped: reload keeps the id, a brand-new tab starts clean.
+const TAB_ACTIVE_SESSION_KEY='hermes-webui-tab-session';
+function _readTabActiveSessionId(){
+  try{ return sessionStorage.getItem(TAB_ACTIVE_SESSION_KEY)||null; }catch(_e){ return null; }
+}
+function _writeTabActiveSessionId(sid){
+  try{
+    if(sid) sessionStorage.setItem(TAB_ACTIVE_SESSION_KEY, sid);
+    else sessionStorage.removeItem(TAB_ACTIVE_SESSION_KEY);
+  }catch(_e){}
+  // Keep legacy localStorage key as a non-authoritative last-touched marker only.
+  // Boot restore must NOT read this for bare `/` navigations (multi-tab isolation).
+  try{
+    if(sid) localStorage.setItem('hermes-webui-session', sid);
+    else localStorage.removeItem('hermes-webui-session');
+  }catch(_e){}
+}
 function _sessionIdFromLocation(){
   if(typeof window==='undefined'||!window.location) return null;
   const marker='/session/';
@@ -4462,7 +4481,7 @@ function _renderBatchActionBar(){
       const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
-        S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
+        S.session=null;S.messages=[];S.entries=[];if(typeof _writeTabActiveSessionId==='function')_writeTabActiveSessionId(null);else localStorage.removeItem('hermes-webui-session');
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         const remaining=await api('/api/sessions'+_sessionListQueryString());
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
@@ -4967,7 +4986,7 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
     const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);
     if(cached) cached.archived=archived;
     if(S.session&&S.session.session_id===session.session_id) S.session.archived=archived;
-    try{ if(archived&&session.session_id&&localStorage.getItem('hermes-webui-session')===session.session_id) localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+    try{ if(archived&&session.session_id&&((typeof _readTabActiveSessionId==='function'?_readTabActiveSessionId():localStorage.getItem('hermes-webui-session'))===session.session_id)){ if(typeof _writeTabActiveSessionId==='function')_writeTabActiveSessionId(null); else localStorage.removeItem('hermes-webui-session'); } }catch(_){ }
     showToast(session.archived?_sessionArchiveToast(response,session):t('session_restored'));
     if(renderHold) await renderHold;
     if(_showArchived&&!_sessionPrefersReducedMotion()) _sessionSwipeReturnOffsets.set(session.session_id,'0px');
@@ -9387,7 +9406,7 @@ async function deleteSession(sid, beforeDelete=null){
   if(S.session&&S.session.session_id===sid){
     S.session=null;S.messages=[];S.entries=[];
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
-    localStorage.removeItem('hermes-webui-session');
+    if(typeof _writeTabActiveSessionId==='function')_writeTabActiveSessionId(null);else localStorage.removeItem('hermes-webui-session');
     // load the most recent remaining session, or show blank if none left
     const remaining=await api('/api/sessions'+_sessionListQueryString());
     if(remaining.sessions&&remaining.sessions.length){

@@ -18,7 +18,7 @@ Usage: ./ctl.sh <command> [args]
 Commands:
   start [bootstrap args...]   Start Hermes WebUI as a background daemon
   stop                        Stop the daemon started by ctl.sh
-  restart [bootstrap args...] Stop, then start again
+  restart [bootstrap args...] Stop port listeners + ctl PID, wait free, start, verify /health
   status                      Show daemon, host/port, log, and health status
   logs [--lines N] [--follow|--no-follow]
                               Show the daemon log (defaults to tail -n 100 -f)
@@ -683,6 +683,102 @@ start_cmd() {
   fi
 }
 
+_pids_listening_on_port() {
+  # Print distinct PIDs that currently hold a TCP LISTEN on $1.
+  local port="$1" out
+  [[ "${port}" =~ ^[0-9]+$ ]] || return 0
+  if command -v ss >/dev/null 2>&1; then
+    out="$(ss -tlnp 2>/dev/null | awk -v p=":${port}" '
+      $4 ~ (p "$") {
+        while (match($0, /pid=[0-9]+/)) {
+          print substr($0, RSTART+4, RLENGTH-4)
+          $0 = substr($0, RSTART+RLENGTH)
+        }
+      }' | sort -u)"
+    [[ -n "${out}" ]] && printf '%s\n' "${out}"
+    return 0
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"${port}" -sTCP:LISTEN -t 2>/dev/null | sort -u
+  fi
+}
+
+_is_hermes_webui_cmdline() {
+  # True if process args look like this repo's server/bootstrap.
+  local args="$1" repo_slash
+  repo_slash="${REPO_ROOT//\\//}"
+  [[ -n "${args}" ]] || return 1
+  local args_slash="${args//\\//}"
+  [[ "${args_slash}" == *"${repo_slash}/server.py"* ||
+     "${args_slash}" == *"${repo_slash}/bootstrap.py"* ||
+     "${args_slash}" == *"hermes-webui/server.py"* ||
+     "${args_slash}" == *"hermes-webui/bootstrap.py"* ]]
+}
+
+_stop_port_webui_listeners() {
+  # Stop hermes-webui processes bound to $port even if ctl.sh did not start them
+  # (bashrc autostart / manual bootstrap). This is what makes restart reliable.
+  local port="$1" pid args stopped=0
+  [[ "${port}" =~ ^[0-9]+$ ]] || return 0
+  while IFS= read -r pid; do
+    [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+    _is_alive "${pid}" || continue
+    args="$(_proc_args "${pid}")"
+    if ! _is_hermes_webui_cmdline "${args}"; then
+      echo "[ctl] Leaving non-webui listener alone on :${port} (PID ${pid}): ${args}" >&2
+      continue
+    fi
+    echo "[ctl] Stopping hermes-webui listener on :${port} (PID ${pid})"
+    _stop_webui_pid "${pid}" TERM
+    stopped=1
+  done < <(_pids_listening_on_port "${port}")
+
+  # Wait for port to free (up to ~8s)
+  local i
+  for i in {1..80}; do
+    if ! _port_answers_http "127.0.0.1" "${port}"; then
+      # also ensure no listen rows remain for our pids
+      local still=0
+      while IFS= read -r pid; do
+        [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+        args="$(_proc_args "${pid}")"
+        if _is_hermes_webui_cmdline "${args}"; then
+          still=1
+          break
+        fi
+      done < <(_pids_listening_on_port "${port}")
+      (( still == 0 )) && return 0
+    fi
+    sleep 0.1
+  done
+
+  # Force-kill remaining hermes-webui listeners
+  while IFS= read -r pid; do
+    [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+    args="$(_proc_args "${pid}")"
+    _is_hermes_webui_cmdline "${args}" || continue
+    echo "[ctl] Force-killing hermes-webui listener PID ${pid}" >&2
+    _stop_webui_pid "${pid}" KILL
+  done < <(_pids_listening_on_port "${port}")
+  sleep 0.3
+  return 0
+}
+
+_wait_port_free() {
+  local host="$1" port="$2" seconds="${3:-10}" i
+  local steps=$(( seconds * 10 ))
+  for (( i=0; i<steps; i++ )); do
+    if ! _port_answers_http "${host}" "${port}"; then
+      # no HTTP answer is good enough for free-or-dying
+      local pids
+      pids="$(_pids_listening_on_port "${port}" || true)"
+      [[ -z "${pids}" ]] && return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 _warn_if_unmanaged_instance_serving() {
   # After stop concluded "nothing to do", check whether a server is STILL
   # answering on the configured port. Silently reporting "stopped" while a
@@ -704,37 +800,52 @@ _warn_if_unmanaged_instance_serving() {
 
 stop_cmd() {
   ensure_home
-  local pid
-  if ! pid="$(_pid_from_file 2>/dev/null)"; then
-    echo "[ctl] Hermes WebUI is stopped"
-    # Warn BEFORE deleting the state file: it carries the saved host/port
-    # binding the probe needs when the instance was started off-default.
-    _warn_if_unmanaged_instance_serving
-    rm -f "${PID_FILE}" "${STATE_FILE}"
-    return 0
-  fi
+  _load_state_if_present
+  local host="${HOST:-${HERMES_WEBUI_HOST:-127.0.0.1}}"
+  local port="${PORT:-${HERMES_WEBUI_PORT:-8787}}"
+  local probe_host
+  probe_host="$(_probe_target_host "${host}")"
+  local pid stopped_owned=0
 
-  if ! _is_alive "${pid}" || ! _is_owned_webui_pid "${pid}"; then
-    _warn_if_unmanaged_instance_serving
-    _clear_stale_pid
-    return 0
-  fi
-
-  echo "[ctl] Stopping Hermes WebUI (PID ${pid})"
-  _stop_webui_pid "${pid}" TERM
-  local i
-  for i in {1..50}; do
-    if ! _is_alive "${pid}"; then
-      rm -f "${PID_FILE}" "${STATE_FILE}"
-      echo "[ctl] Stopped"
-      return 0
+  if pid="$(_pid_from_file 2>/dev/null)"; then
+    if _is_alive "${pid}" && _is_owned_webui_pid "${pid}"; then
+      echo "[ctl] Stopping Hermes WebUI (PID ${pid})"
+      _stop_webui_pid "${pid}" TERM
+      local i
+      for i in {1..50}; do
+        if ! _is_alive "${pid}"; then
+          stopped_owned=1
+          break
+        fi
+        sleep 0.1
+      done
+      if (( ! stopped_owned )); then
+        echo "[ctl] Process did not exit after SIGTERM; sending SIGKILL" >&2
+        _stop_webui_pid "${pid}" KILL
+        stopped_owned=1
+      fi
+    else
+      echo "[ctl] PID file is stale (PID ${pid}); clearing"
     fi
-    sleep 0.1
-  done
+  else
+    echo "[ctl] No ctl-managed PID file"
+  fi
 
-  echo "[ctl] Process did not exit after SIGTERM; sending SIGKILL" >&2
-  _stop_webui_pid "${pid}" KILL
+  # Always clear hermes-webui listeners on the bound port (bashrc / manual start).
+  _stop_port_webui_listeners "${port}"
+
   rm -f "${PID_FILE}" "${STATE_FILE}"
+
+  if _wait_port_free "${probe_host}" "${port}" 8; then
+    echo "[ctl] Stopped (port ${probe_host}:${port} free)"
+    return 0
+  fi
+
+  echo "[ctl] Warning: ${probe_host}:${port} still answers after stop" >&2
+  local listener_diag
+  listener_diag="$(_port_listener_diag "${port}")"
+  [[ -n "${listener_diag}" ]] && echo "[ctl]   listener: ${listener_diag}" >&2
+  return 1
 }
 
 _health_line() {
@@ -811,6 +922,59 @@ status_cmd() {
   fi
 }
 
+restart_cmd() {
+  # Reliable restart for mixed supervisors:
+  # 1) stop ctl-managed PID if any
+  # 2) stop any hermes-webui listener on the target port (bashrc/manual)
+  # 3) wait until port is free
+  # 4) start via bootstrap.py and wait for /health
+  ensure_home
+  _load_repo_dotenv_preserving_env
+  _load_hermes_dotenv
+  _load_state_if_present
+  _parse_launch_binding "$@"
+  local host="${CTL_HOST:-${HOST:-${HERMES_WEBUI_HOST:-127.0.0.1}}}"
+  local port="${CTL_PORT:-${PORT:-${HERMES_WEBUI_PORT:-8787}}}"
+  local probe_host
+  probe_host="$(_probe_target_host "${host}")"
+
+  echo "[ctl] Restarting Hermes WebUI on ${probe_host}:${port}"
+  # stop_cmd already clears port listeners; ignore non-zero if something foreign remains
+  stop_cmd || true
+
+  if ! _wait_port_free "${probe_host}" "${port}" 12; then
+    echo "[ctl] Port ${probe_host}:${port} still busy after stop; forcing listener cleanup" >&2
+    _stop_port_webui_listeners "${port}"
+    if ! _wait_port_free "${probe_host}" "${port}" 8; then
+      echo "[ctl] Cannot free ${probe_host}:${port}; aborting start" >&2
+      _port_listener_diag "${port}" >&2 || true
+      return 1
+    fi
+  fi
+
+  # Give startup more room than default 3s (cold import + plugin load).
+  export HERMES_WEBUI_START_GRACE="${HERMES_WEBUI_START_GRACE:-12}"
+  start_cmd "$@"
+  local rc=$?
+  if (( rc != 0 )); then
+    return "${rc}"
+  fi
+
+  # Final health gate against the real listener, not just child PID survival.
+  local i
+  for i in {1..40}; do
+    if hermes_webui_probe_health "${probe_host}" "${port}" "/health" 1 direct >/dev/null 2>&1; then
+      local live_pid
+      live_pid="$(_pids_listening_on_port "${port}" | head -n1 || true)"
+      echo "[ctl] Restart healthy${live_pid:+ (listener PID ${live_pid})}"
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "[ctl] Started process but /health still unreachable; check ${LOG_FILE}" >&2
+  return 1
+}
+
 logs_cmd() {
   ensure_home
   local lines=100 follow=1
@@ -854,7 +1018,7 @@ fi
 case "${cmd}" in
   start) start_cmd "$@" ;;
   stop) stop_cmd ;;
-  restart) stop_cmd; start_cmd "$@" ;;
+  restart) restart_cmd "$@" ;;
   status) status_cmd ;;
   logs) logs_cmd "$@" ;;
   -h|--help|help|"") usage ;;

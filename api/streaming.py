@@ -2991,18 +2991,16 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
     models can consume them in the same request. Non-image files intentionally
     stay as text path attachments so the agent can inspect them with file tools.
 
-    When *cfg* is provided, respects ``agent.image_input_mode`` — if the resolved
-    mode is ``"text"``, returns a plain string (attachments are not embedded) so
-    the agent's text-mode pipeline (``vision_analyze``) handles images.
+    When *cfg* is provided, respects ``agent.image_input_mode``. In ``"text"``
+    mode, validated image paths are listed for the agent's ``vision_analyze``
+    tool; in ``"native"`` mode, image bytes are embedded as data URLs.
     """
     if not attachments:
         return workspace_ctx + msg_text
 
-    # ── Check image_input_mode before embedding anything ──
-    if cfg is not None and _resolve_image_input_mode(cfg, active_provider, active_model, requested_provider=requested_provider) == "text":
-        return workspace_ctx + msg_text
-
-    parts = [{'type': 'text', 'text': workspace_ctx + msg_text}]
+    # ── Resolve the same trusted roots before choosing the input mode ──
+    # Text mode still needs to pass WebUI attachment paths to the agent's
+    # vision_analyze tool; returning only the prompt silently drops them.
     workspace_root = Path(workspace).expanduser().resolve()
     # Stage-361 maintainer fix (Opus SHOULD-FIX): chat uploads from #2319 now
     # land in ~/.hermes/webui/attachments/<sid>/ (outside workspace_root by
@@ -3018,6 +3016,38 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
         _allowed_roots = (workspace_root, attachment_root)
     except Exception:
         _allowed_roots = (workspace_root,)
+
+    if cfg is not None and _resolve_image_input_mode(cfg, active_provider, active_model, requested_provider=requested_provider) == "text":
+        safe_images = []
+        for att in attachments or []:
+            if not isinstance(att, dict):
+                continue
+            raw_path = str(att.get('path') or '').strip()
+            if not raw_path:
+                continue
+            try:
+                path = Path(raw_path).expanduser().resolve()
+                if not any(path.is_relative_to(r) for r in _allowed_roots):
+                    continue
+                if not path.is_file():
+                    continue
+                mime = str(att.get('mime') or '').strip() or (mimetypes.guess_type(path.name)[0] or '')
+                if not mime.startswith('image/') or not _is_valid_image(path, mime):
+                    continue
+                safe_images.append(str(path))
+            except Exception:
+                continue
+        if safe_images:
+            image_lines = "\n".join(f"- {path}" for path in safe_images)
+            return (
+                workspace_ctx + msg_text
+                + "\n\n[Attached image(s)]\n"
+                + image_lines
+                + "\nUse vision_analyze with image_url set to each listed path before answering."
+            )
+        return workspace_ctx + msg_text
+
+    parts = [{'type': 'text', 'text': workspace_ctx + msg_text}]
     image_count = 0
 
     for att in attachments or []:

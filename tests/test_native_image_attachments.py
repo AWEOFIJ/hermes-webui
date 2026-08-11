@@ -189,6 +189,24 @@ class TestBuildNativeMultimodalMessage:
             assert isinstance(result, str)
             assert 'read' in result
 
+    def test_text_mode_preserves_image_for_vision_analyze(self):
+        """Text routing must not silently discard WebUI image attachments."""
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            img = root / 'photo.png'
+            _make_png(img)
+            atts = _normalize_chat_attachments([{
+                'name': 'photo.png', 'path': str(img),
+                'mime': 'image/png', 'size': img.stat().st_size, 'is_image': True,
+            }])
+            result = _build_native_multimodal_message(
+                '', 'what is shown?', atts, str(root),
+                cfg={'agent': {'image_input_mode': 'text'}},
+            )
+            assert isinstance(result, str)
+            assert str(img) in result
+            assert 'vision_analyze' in result
+
     def test_outside_workspace_path_rejected(self):
         with TemporaryDirectory() as d:
             root = Path(d)

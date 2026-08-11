@@ -48,6 +48,7 @@ MESSAGING_SOURCES = {
     'slack',
     'telegram',
     'weixin',
+    'matrix',
 }
 
 CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
@@ -60,6 +61,7 @@ SOURCE_LABELS = {
     'cron': 'Cron',
     'discord': 'Discord',
     'email': 'Email',
+    'kanban': 'Kanban',
     'line': 'LINE',
     'wecom': 'WeCom',
     'wecom_callback': 'WeCom Callback',
@@ -70,6 +72,7 @@ SOURCE_LABELS = {
     'webhook': 'Webhook',
     'webui': 'WebUI',
     'weixin': 'Weixin',
+    'matrix': 'Matrix',
 }
 
 
@@ -97,6 +100,8 @@ def normalize_agent_session_source(raw_source: str | None) -> dict:
         session_source = 'cron'
     elif raw == 'webhook':
         session_source = 'webhook'
+    elif raw == 'kanban':
+        session_source = 'kanban'
     elif raw == 'tool':
         session_source = 'tool'
     elif raw == 'api_server':
@@ -220,7 +225,7 @@ def is_cli_session_row(row: dict) -> bool:
     # runner, never a writable WebUI/CLI session (#5307). Classify it non-CLI so
     # sidebar rows and every is_cli_session_row() consumer keep it out of the
     # CLI/writable treatment.
-    non_cli_sources = MESSAGING_SOURCES | {"cron", "webhook", "tool", "api", "api_server", "subagent"}
+    non_cli_sources = MESSAGING_SOURCES | {"cron", "webhook", "kanban", "tool", "api", "api_server", "subagent"}
     if {source, source_tag, raw_source, source_name, source_label} & non_cli_sources:
         return False
     if source == "messaging":

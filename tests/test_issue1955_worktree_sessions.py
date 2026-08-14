@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -20,6 +21,12 @@ def _isolate_sessions(tmp_path, monkeypatch):
     SESSIONS.clear()
     yield session_dir
     SESSIONS.clear()
+
+
+def test_new_session_uses_timestamp_suffix_id(_isolate_sessions):
+    session = Session(workspace=str(_isolate_sessions.parent / "workspace"))
+
+    assert re.fullmatch(r"\d{8}_\d{6}_[0-9a-f]{6}", session.session_id)
 
 
 def test_worktree_metadata_round_trips_through_session_file(_isolate_sessions):

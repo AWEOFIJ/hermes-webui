@@ -14625,7 +14625,7 @@ def handle_post(handler, parsed) -> bool:
             # Items inside `messages` are dicts with mutable values (tool_calls,
             # content arrays), so a shallow `list(...)` is not enough.
             copied_session = Session(
-                session_id=uuid.uuid4().hex[:12],
+                # Session generates the canonical timestamp-suffix ID when omitted.
                 # Defensive: legacy sessions may have title=None on disk; fall back to 'Untitled'
                 # so `+ " (copy)"` doesn't TypeError.
                 title=(session.title or "Untitled") + " (copy)",
@@ -22218,7 +22218,7 @@ def _handle_session_compression_recovery_start(handler, body):
             if not title.endswith(" (focused continuation)"):
                 title = f"{title} (focused continuation)"
             copied_session = Session(
-                session_id=uuid.uuid4().hex[:12],
+                # Session generates the canonical timestamp-suffix ID when omitted.
                 title=title,
                 workspace=getattr(source, "workspace", get_last_workspace()),
                 model=getattr(source, "model", None),

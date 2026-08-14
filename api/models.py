@@ -44,6 +44,12 @@ from api.agent_sessions import (
 )
 from api.process_event_utils import stamp_message_source
 
+
+def _new_session_id() -> str:
+    """Create a session ID shared with the Hermes Agent session format."""
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{timestamp}_{uuid.uuid4().hex[:6]}"
+
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
 # How many messageful cron sessions to surface in the project-chip layer.
@@ -1240,7 +1246,7 @@ class Session:
                  share_token=None,
                  share_created_at=None,
                  **kwargs):
-        self.session_id = session_id or uuid.uuid4().hex[:12]
+        self.session_id = session_id or _new_session_id()
         self.title = title
         self.workspace = str(Path(workspace).expanduser().resolve())
         # #6672: immutable snapshot of the workspace at session creation time.

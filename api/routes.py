@@ -16690,6 +16690,8 @@ def handle_post(handler, parsed) -> bool:
         return _handle_session_handoff(handler, body)
     if parsed.path == "/api/session/handoff/status":
         return _handle_session_handoff_status(handler, body)
+    if parsed.path == "/api/session/external-reply":
+        return _handle_session_external_reply(handler, body)
 
     # ── Auth endpoints (POST) ──
     if parsed.path == "/api/auth/login":
@@ -26300,10 +26302,20 @@ def _handle_session_handoff(handler, body):
         return bad(handler, 'state.db is unavailable.', 500)
     try:
         # Ensure a session row exists so the gateway has something to
-        # switch_session onto (mirror CLI: stub-title insert).
+        # switch_session onto. set_session_title is UPDATE-only (returns
+        # False on a missing row — the CLI's INSERT-OR-IGNORE comment is
+        # stale), so create the stub explicitly, then carry the WebUI
+        # sidecar title over so the destination thread gets a real name.
         row = db.get_session(sid)
         if not row:
-            db.set_session_title(sid, f"handoff-{sid[:8]}")
+            db.create_session(sid, 'webui')
+            try:
+                sidecar = Session.load(sid)
+                sidecar_title = getattr(sidecar, 'title', None)
+                if sidecar_title:
+                    db.set_session_title(sid, sidecar_title)
+            except Exception:
+                pass
         ok = db.request_handoff(sid, platform)
     except Exception as exc:
         logger.warning('handoff request failed for %s: %s', sid, exc)
@@ -26335,7 +26347,7 @@ def _handle_session_handoff_status(handler, body):
             db.close()
         except Exception:
             pass
-    if not state:
+    if not state or not state.get('state'):
         return j(handler, {'ok': True, 'status': 'none'})
     return j(handler, {
         'ok': True,
@@ -26343,6 +26355,191 @@ def _handle_session_handoff_status(handler, body):
         'platform': state.get('platform'),
         'error': state.get('error'),
     })
+
+
+def _handle_session_external_reply(handler, body):
+    """Reply to an external (messaging) session THROUGH the gateway.
+
+    The gateway API server's ``/api/sessions/{id}/chat`` runs the turn in the
+    SAME gateway session (context + state.db stay in sync with the original
+    platform) but does NOT push the reply to the platform (HTTP
+    request/response model — api_server's send() is a stub). So after the
+    turn we also deliver the exchange to the originating Discord channel via
+    the bot REST API, giving the WebUI a true bidirectional reply path.
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    try:
+        require(body, 'session_id')
+        require(body, 'message')
+    except ValueError as e:
+        return bad(handler, str(e))
+    sid = str(body['session_id'])
+    message = str(body['message']).strip()
+    if not message:
+        return bad(handler, 'message is required', 400)
+    if len(message) > 8000:
+        return bad(handler, 'message too long', 400)
+
+    db = _open_state_db_for_handoff()
+    if db is None:
+        return bad(handler, 'state.db is unavailable.', 500)
+    try:
+        row = db.get_session(sid)
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+    if not row:
+        return bad(handler, 'Session not found in state.db', 404)
+    session_key = str(row.get('session_key') or '')
+    parsed = _parse_gateway_session_key(session_key)
+    if not parsed:
+        return bad(handler, 'Session is not bound to a messaging platform (no gateway session_key).', 409)
+
+    gw_base = os.getenv('HERMES_WEBUI_GATEWAY_BASE_URL', 'http://127.0.0.1:8642').rstrip('/')
+    api_key = _read_env_value('API_SERVER_KEY')
+    if not api_key:
+        return bad(handler, 'API_SERVER_KEY is not configured in ~/.hermes/.env. Add it and restart the gateway.', 500)
+
+    # 1) Run the turn in the gateway, same session context. Long timeout: an
+    #    agent turn with tools can take a while.
+    try:
+        req = urllib.request.Request(
+            f'{gw_base}/api/sessions/{urllib.parse.quote(sid)}/chat',
+            data=json.dumps({'message': message}).encode('utf-8'),
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {api_key}',
+                'X-Hermes-Session-Key': session_key,
+            },
+            method='POST',
+        )
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            result = json.loads(resp.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        detail = ''
+        try:
+            detail = e.read().decode('utf-8', 'replace')[:300]
+        except Exception:
+            pass
+        logger.warning('external reply gateway chat HTTP %s for %s: %s', e.code, sid, detail)
+        return bad(handler, f'Gateway chat failed (HTTP {e.code}): {detail}', 502)
+    except Exception as exc:
+        logger.warning('external reply gateway chat failed for %s: %s', sid, exc)
+        return bad(handler, f'Gateway chat failed: {exc}', 502)
+
+    reply = ''
+    if isinstance(result, dict):
+        msg = result.get('message') or {}
+        reply = str(msg.get('content') or '').strip()
+    if not reply:
+        return bad(handler, 'Gateway returned no reply.', 502)
+
+    # 2) Deliver the exchange to the originating Discord channel/thread via
+    #    the bot REST API (best-effort; delivery failures never fail the API).
+    delivered = False
+    bot_token = _read_env_value('DISCORD_BOT_TOKEN')
+    if parsed['platform'] == 'discord' and bot_token:
+        channel_id = parsed.get('thread_id') or parsed.get('chat_id')
+        if channel_id:
+            _post_discord_exchange(bot_token, channel_id, message, reply)
+            delivered = True
+
+    return j(handler, {
+        'ok': True,
+        'reply': reply,
+        'session_id': sid,
+        'delivered': delivered,
+    })
+
+
+def _parse_gateway_session_key(session_key: str) -> dict | None:
+    """Parse ``agent:main:<platform>:<chat_type>:<chat_id>[:<thread_id>]``."""
+    if not session_key:
+        return None
+    parts = session_key.split(':')
+    if len(parts) < 5 or parts[0] != 'agent':
+        return None
+    return {
+        'platform': parts[2],
+        'chat_type': parts[3],
+        'chat_id': parts[4],
+        'thread_id': parts[5] if len(parts) > 5 and parts[5] else None,
+    }
+
+
+def _read_env_value(key: str) -> str:
+    """Read a key from HERMES_HOME/.env.
+
+    The WebUI process does not inherit the gateway's loaded environment, so
+    read the secrets file directly instead of relying on os.environ.
+    """
+    try:
+        env_path = Path(os.getenv('HERMES_HOME', str(Path.home() / '.hermes'))) / '.env'
+        for line in env_path.read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            k, _, v = line.partition('=')
+            if k.strip() == key:
+                return v.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return ''
+
+
+def _discord_message_chunks(text: str, limit: int = 2000) -> list:
+    """Split text into Discord-size message chunks (hard limit 2000 chars)."""
+    text = text or ''
+    if len(text) <= limit:
+        return [text] if text else []
+    chunks = []
+    while len(text) > limit:
+        cut = text.rfind('\n', 0, limit)
+        if cut < limit // 2:
+            cut = limit
+        chunks.append(text[:cut].rstrip())
+        text = text[cut:].lstrip()
+    if text:
+        chunks.append(text)
+    return chunks
+
+
+def _post_discord_exchange(bot_token: str, channel_id: str, user_message: str, reply: str) -> None:
+    """Post the WebUI-origin user message (marked) + the agent reply to a
+    Discord channel/thread via the bot REST API. Best-effort."""
+    import urllib.request
+
+    base = 'https://discord.com/api/v10'
+    # Discord rejects API calls without a descriptive User-Agent (Python's
+    # default urllib UA returns 403 Forbidden).
+    headers = {
+        'Authorization': f'Bot {bot_token}',
+        'Content-Type': 'application/json',
+        'User-Agent': 'HermesWebUI/1.0 (https://github.com/AWEOFIJ/hermes-webui)',
+    }
+
+    def _post(content: str) -> None:
+        for chunk in _discord_message_chunks(content):
+            req = urllib.request.Request(
+                f'{base}/channels/{channel_id}/messages',
+                data=json.dumps({'content': chunk}).encode('utf-8'),
+                headers=headers,
+                method='POST',
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    resp.read()
+            except Exception as exc:
+                logger.warning('discord delivery failed to channel %s: %s', channel_id, exc)
+                return
+
+    _post(f'**[來自 WebUI]** {user_message}')
+    _post(reply)
 
 
 def _handle_session_import_cli(handler, body):

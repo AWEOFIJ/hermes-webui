@@ -1347,6 +1347,53 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   return restoredVisible;
 }
 
+async function _sendExternalSessionReply(text){
+  // Reply to a messaging (Discord/Telegram/…) session through the gateway
+  // bridge. The backend POSTs to the gateway API server (same session
+  // context) and delivers the agent's reply back to the platform channel.
+  if(!S.session) return;
+  const activeSid=S.session.session_id;
+  try{
+    S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+    renderMessages();setBusy(true);
+    if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+  }catch(_){}
+  try{
+    const res=await api('/api/session/external-reply',{
+      method:'POST',
+      body:JSON.stringify({session_id:activeSid,message:text}),
+      timeoutMs:240000
+    });
+    if(res && res.ok && res.reply){
+      S.messages.push({role:'assistant',content:res.reply,_ts:Date.now()/1000});
+      if(typeof renderMessages==='function') renderMessages();
+      // Refresh from state.db (the gateway persisted the run) to pick up any
+      // tool rows / canonical formatting.
+      try{
+        const imp=await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:activeSid})});
+        if(imp && imp.session && Array.isArray(imp.session.messages)){
+          const prev=S.messages.length;
+          const next=imp.session.messages.filter(m=>m&&m.role);
+          if(next.length>=prev) S.messages=next;
+          if(typeof renderMessages==='function') renderMessages();
+        }
+      }catch(_){}
+    }else{
+      const errMsg=(res&&res.error)||t('external_reply_failed');
+      showToast(errMsg,6000,'error');
+      S.messages.push({role:'assistant',content:'⚠️ '+errMsg,_ts:Date.now()/1000});
+      if(typeof renderMessages==='function') renderMessages();
+    }
+  }catch(err){
+    const errMsg=t('external_reply_failed')+': '+(err&&err.message?err.message:String(err||''));
+    showToast(errMsg,6000,'error');
+    S.messages.push({role:'assistant',content:'⚠️ '+errMsg,_ts:Date.now()/1000});
+    if(typeof renderMessages==='function') renderMessages();
+  }finally{
+    try{setBusy(false);}catch(_){S.busy=false;}
+  }
+}
+
 async function send(){
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
@@ -1381,6 +1428,18 @@ async function send(){
   _flushSelectionBlocksToComposer();
   text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
+  // External (messaging) sessions have no in-process agent pipeline — reply
+  // through the gateway bridge so the SAME session runs the turn and the
+  // reply is delivered back to the originating platform (Discord).
+  if(typeof _isExternalSession==='function' && S.session && _isExternalSession(S.session)){
+    if(S.pendingFiles.length){
+      showToast(t('external_reply_no_attachments'),4000,'error');
+      S.pendingFiles=[];renderTray();
+    }
+    $('msg').value='';autoResize();renderTray();
+    await _sendExternalSessionReply(text);
+    return;
+  }
   if(typeof shouldInterceptCompressionRecoveryContinuation==='function'&&shouldInterceptCompressionRecoveryContinuation(text,S.pendingFiles)){
     if(typeof showCompressionRecoveryContinuationHint==='function') showCompressionRecoveryContinuationHint();
     _sendInProgress=false;_sendInProgressSid=null;

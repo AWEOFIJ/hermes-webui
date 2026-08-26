@@ -225,6 +225,20 @@ def is_safe_session_id(sid) -> bool:
     return all(c in _SAFE_SID_CHARS for c in sid)
 
 
+def new_session_id() -> str:
+    """Generate a new WebUI session id in the canonical ``YYYYMMDD_HHMMSS_hex``
+    format, matching the Hermes agent/gateway session id convention
+    (gateway/session.py: ``f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"``).
+
+    WebUI-created sessions previously used a bare 12-char hex id
+    (``uuid.uuid4().hex[:12]``), which did not sort chronologically and did not
+    match agent-origin sessions.  All WebUI session creation now uses this
+    shared helper so every session id — WebUI, CLI, gateway, cron — follows the
+    same stable, time-ordered format.
+    """
+    return f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+
 def _cleanup_stale_tmp_files() -> None:
     """Best-effort removal of stale ``*.tmp.*`` files from SESSION_DIR.
 
@@ -1240,7 +1254,7 @@ class Session:
                  share_token=None,
                  share_created_at=None,
                  **kwargs):
-        self.session_id = session_id or uuid.uuid4().hex[:12]
+        self.session_id = session_id or new_session_id()
         self.title = title
         self.workspace = str(Path(workspace).expanduser().resolve())
         # #6672: immutable snapshot of the workspace at session creation time.

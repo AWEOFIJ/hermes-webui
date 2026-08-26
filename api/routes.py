@@ -9609,6 +9609,7 @@ from api.models import (
     persist_recovered_workspace_binding,
     WorkspaceBindingPersistenceError,
     new_session,
+    new_session_id,
     all_sessions,
     title_from,
     _write_session_index,
@@ -14625,7 +14626,7 @@ def handle_post(handler, parsed) -> bool:
             # Items inside `messages` are dicts with mutable values (tool_calls,
             # content arrays), so a shallow `list(...)` is not enough.
             copied_session = Session(
-                session_id=uuid.uuid4().hex[:12],
+                session_id=new_session_id(),
                 # Defensive: legacy sessions may have title=None on disk; fall back to 'Untitled'
                 # so `+ " (copy)"` doesn't TypeError.
                 title=(session.title or "Untitled") + " (copy)",
@@ -16683,6 +16684,12 @@ def handle_post(handler, parsed) -> bool:
     # ── CLI session import (POST) ──
     if parsed.path == "/api/session/import_cli":
         return _handle_session_import_cli(handler, body)
+
+    # ── Session handoff to messaging platform (mirrors CLI /handoff) ──
+    if parsed.path == "/api/session/handoff":
+        return _handle_session_handoff(handler, body)
+    if parsed.path == "/api/session/handoff/status":
+        return _handle_session_handoff_status(handler, body)
 
     # ── Auth endpoints (POST) ──
     if parsed.path == "/api/auth/login":
@@ -22218,7 +22225,7 @@ def _handle_session_compression_recovery_start(handler, body):
             if not title.endswith(" (focused continuation)"):
                 title = f"{title} (focused continuation)"
             copied_session = Session(
-                session_id=uuid.uuid4().hex[:12],
+                session_id=new_session_id(),
                 title=title,
                 workspace=getattr(source, "workspace", get_last_workspace()),
                 model=getattr(source, "model", None),
@@ -26211,6 +26218,131 @@ def _is_messages_refresh_prefix_match(existing_messages: list, fresh_messages: l
         if _normalize_message_for_import_refresh(existing_message) != _normalize_message_for_import_refresh(fresh_message):
             return False
     return True
+
+
+def _open_state_db_for_handoff():
+    """Open a SessionDB on the active profile's state.db (best-effort).
+
+    Mirrors ``api.state_sync``'s opener so the WebUI can write handoff state
+    rows that the Hermes Gateway's handoff watcher picks up.
+    """
+    try:
+        from hermes_state import SessionDB  # type: ignore
+    except ImportError:
+        return None
+    try:
+        from api.profiles import get_active_hermes_home
+        home = Path(get_active_hermes_home()).expanduser().resolve()
+    except Exception:
+        home = Path(os.getenv('HERMES_HOME', str(Path.home() / '.hermes')))
+    db_path = home / 'state.db'
+    if not db_path.exists():
+        return None
+    try:
+        return SessionDB(db_path)
+    except Exception:
+        return None
+
+
+def _handoff_preflight_error(platform: str) -> str | None:
+    """Return a user-facing error string if handoff to ``platform`` can't proceed.
+
+    Mirrors the CLI ``/handoff`` pre-checks (gateway running, platform
+    connected, home channel configured). The gateway's handoff watcher is the
+    real security/execution gate; these checks only fail fast for UX.
+    """
+    try:
+        gw_state_path = Path(os.getenv('HERMES_HOME', str(Path.home() / '.hermes'))) / 'gateway_state.json'
+        gw = json.loads(gw_state_path.read_text(encoding='utf-8'))
+    except Exception:
+        return 'Gateway state is unavailable — is `hermes gateway` running?'
+    if gw.get('gateway_state') != 'running':
+        return 'Gateway is not running.'
+    pstate = ((gw.get('platforms') or {}).get(platform) or {}).get('state')
+    if pstate != 'connected':
+        return f"Platform '{platform}' is not connected."
+    try:
+        from gateway.config import load_gateway_config, Platform
+        gw_cfg = load_gateway_config()
+        home = gw_cfg.get_home_channel(Platform(platform))
+    except Exception:
+        home = None
+    if not home or not getattr(home, 'chat_id', None):
+        return f"No home channel configured for {platform}. Run /sethome on the destination chat first."
+    return None
+
+
+def _handle_session_handoff(handler, body):
+    """Queue a WebUI session for handoff to a messaging platform (mirrors CLI /handoff).
+
+    Writes ``handoff_state='pending'`` + ``handoff_platform`` on the session
+    row in state.db; the running Hermes Gateway's handoff watcher (2s poll)
+    creates a fresh thread on the platform's home channel, re-binds it to the
+    SAME session id, replays the full transcript, and continues the
+    conversation there. The WebUI keeps live-syncing that session via the
+    gateway watcher SSE.
+    """
+    try:
+        require(body, 'session_id')
+    except ValueError as e:
+        return bad(handler, str(e))
+    sid = str(body['session_id'])
+    platform = str((body or {}).get('platform') or 'discord').strip().lower()
+    if platform not in ('discord', 'telegram', 'slack', 'whatsapp', 'signal', 'matrix'):
+        return bad(handler, f"Unsupported handoff platform '{platform}'.", 400)
+
+    preflight = _handoff_preflight_error(platform)
+    if preflight:
+        return bad(handler, preflight, 409)
+
+    db = _open_state_db_for_handoff()
+    if db is None:
+        return bad(handler, 'state.db is unavailable.', 500)
+    try:
+        # Ensure a session row exists so the gateway has something to
+        # switch_session onto (mirror CLI: stub-title insert).
+        row = db.get_session(sid)
+        if not row:
+            db.set_session_title(sid, f"handoff-{sid[:8]}")
+        ok = db.request_handoff(sid, platform)
+    except Exception as exc:
+        logger.warning('handoff request failed for %s: %s', sid, exc)
+        return bad(handler, f'Could not queue handoff: {exc}', 500)
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+    if not ok:
+        return bad(handler, 'Session is already in flight for handoff. Wait for it to settle, then retry.', 409)
+    return j(handler, {'ok': True, 'status': 'pending', 'session_id': sid, 'platform': platform})
+
+
+def _handle_session_handoff_status(handler, body):
+    """Return the current handoff state for a session (pending/running/completed/failed)."""
+    try:
+        require(body, 'session_id')
+    except ValueError as e:
+        return bad(handler, str(e))
+    sid = str(body['session_id'])
+    db = _open_state_db_for_handoff()
+    if db is None:
+        return bad(handler, 'state.db is unavailable.', 500)
+    try:
+        state = db.get_handoff_state(sid)
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+    if not state:
+        return j(handler, {'ok': True, 'status': 'none'})
+    return j(handler, {
+        'ok': True,
+        'status': state.get('state'),
+        'platform': state.get('platform'),
+        'error': state.get('error'),
+    })
 
 
 def _handle_session_import_cli(handler, body):

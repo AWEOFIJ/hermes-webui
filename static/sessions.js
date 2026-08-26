@@ -13,6 +13,7 @@ const ICONS={
   spark:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8l1.1 3.1 3.1 1.1-3.1 1.1L8 10.2 6.9 7.1 3.8 6l3.1-1.1z"/><path d="M12.5 9.5l.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5z"/></svg>',
   link:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.7 9.3a3 3 0 0 1 0-4.2l1.7-1.7a3 3 0 0 1 4.2 4.2l-1 1"/><path d="M9.3 6.7a3 3 0 0 1 0 4.2l-1.7 1.7a3 3 0 0 1-4.2-4.2l1-1"/></svg>',
   download:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M14 10.5v2.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-2.5"/><polyline points="4.5 7 8 10.5 11.5 7"/><line x1="8" y1="10.5" x2="8" y2="2"/></svg>',
+  handoff:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8h9"/><polyline points="8.5 4.5 12 8 8.5 11.5"/></svg>',
 };
 
 // Tracks which session_id is currently being loaded. Used to discard stale
@@ -4945,6 +4946,61 @@ function _appendSessionDuplicateAction(menu, session){
   ));
 }
 
+function _appendSessionHandoffAction(menu, session){
+  // "Continue in Discord" — queue this WebUI session for gateway handoff
+  // (mirrors the CLI /handoff command). The gateway picks the row up within
+  // ~2s, creates a fresh Discord thread bound to the SAME session id, replays
+  // the full transcript, and the conversation continues there. The WebUI
+  // sidebar keeps live-syncing that session via the gateway watcher SSE.
+  menu.appendChild(_buildSessionAction(
+    t('session_handoff_discord'),
+    t('session_handoff_discord_desc'),
+    ICONS.handoff,
+    async()=>{
+      closeSessionActionMenu();
+      try{
+        const confirmMsg=t('session_handoff_discord_confirm');
+        if(typeof window.confirm==='function' && confirmMsg && !window.confirm(confirmMsg)) return;
+        showToast(t('session_handoff_queued'),2000);
+        const res=await api('/api/session/handoff',{method:'POST',body:JSON.stringify({session_id:session.session_id,platform:'discord'})});
+        if(res && res.ok){
+          _pollHandoffStatus(session.session_id,0);
+        }else{
+          showToast((res&&res.error)||t('session_handoff_failed'),5000,'error');
+        }
+      }catch(err){
+        showToast(t('session_handoff_failed')+': '+(err&&err.message?err.message:String(err||'')),5000,'error');
+      }
+    }
+  ));
+}
+
+function _pollHandoffStatus(sid, tries){
+  if(!sid) return;
+  if(tries>=60) return; // ~60s cap (CLI parity)
+  setTimeout(async ()=>{
+    try{
+      const res=await api('/api/session/handoff/status',{method:'POST',body:JSON.stringify({session_id:sid})});
+      const st=res && res.status;
+      if(st==='completed'){
+        showToast(t('session_handoff_completed'),6000);
+        if(typeof renderSessionList==='function') void renderSessionList();
+        return;
+      }
+      if(st==='failed'){
+        showToast(t('session_handoff_failed_detail')+((res&&res.error)?': '+res.error:''),7000,'error');
+        return;
+      }
+      if(st==='running' && tries===1){
+        showToast(t('session_handoff_transferring'),2500);
+      }
+      _pollHandoffStatus(sid,tries+1);
+    }catch(e){
+      _pollHandoffStatus(sid,tries+1);
+    }
+  },1000);
+}
+
 function _appendSessionExportHtmlAction(menu, session){
   // Per-conversation "Export as HTML" — the sidebar ⋮ menu is the app's uniform
   // home for per-conversation actions (matches ChatGPT / Open WebUI). Operates
@@ -5114,6 +5170,7 @@ function _openSessionActionMenu(session, anchorEl){
   }
   if(!isExternalSession){
     _appendSessionDuplicateAction(menu, session);
+    _appendSessionHandoffAction(menu, session);
   }
   _appendSessionExportHtmlAction(menu, session);
   if(session.active_stream_id){

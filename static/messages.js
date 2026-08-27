@@ -1669,6 +1669,15 @@ async function send(){
     }
   }
   if(!S.session){await newSession();await renderSessionList();}
+  // A profile switch can leave the visible conversation stamped with the
+  // previous profile. Uploads are session-scoped, so do not send the file with
+  // that stale session_id; mint a fresh session under the active profile first.
+  const _activeProfileForSend=String(S.activeProfile||'default');
+  const _sessionProfileForSend=String((S.session&&S.session.profile)||'default');
+  if(_activeProfileForSend!==_sessionProfileForSend&&typeof newSession==='function'){
+    await newSession(false);
+    await renderSessionList();
+  }
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;

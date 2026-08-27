@@ -57,6 +57,15 @@ def test_server_provisional_titles_strip_attached_files_context():
     assert "/tmp/private" not in title
 
 
+def test_upload_visibility_uses_request_profile_context():
+    src = UPLOAD_PY.read_text(encoding="utf-8")
+    start = src.index("def _session_visible_to_active_profile")
+    end = src.index("def _reject_invisible_session", start)
+    body = src[start:end]
+    assert "_get_active_profile_name()" in body
+    assert "get_profile_cookie" not in body
+
+
 def test_duplicate_upload_response_reports_actual_stored_filename(tmp_path, monkeypatch):
     """Duplicate upload names should report the suffixed stored basename."""
     monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(tmp_path))
@@ -75,3 +84,6 @@ def test_duplicate_upload_response_reports_actual_stored_filename(tmp_path, monk
     handle_body = src[src.index("def handle_upload"):src.index("def extract_archive", src.index("def handle_upload"))]
     assert "'filename': dest.name" in handle_body
     assert "'filename': safe_name" not in handle_body
+    assert "from api.routes import _get_or_materialize_session" in handle_body
+    assert "s = _get_or_materialize_session(session_id)" in src
+    assert "_session_visible_to_active_profile(session, handler)" in src

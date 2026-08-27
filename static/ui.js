@@ -21144,6 +21144,7 @@ async function uploadPendingFiles(options={}){
       if(f&&f.size>MAX_UPLOAD_BYTES)throw new Error(_uploadTooLargeMessage(f));
       const fd=new FormData();
       fd.append('session_id',sessionId);fd.append('file',f,f.name);
+      if(S.activeProfile)fd.append('profile',String(S.activeProfile));
       const isArchive=_ARCHIVE_EXTS.test(f.name);
       const url=new URL(isArchive?'api/upload/extract':'api/upload',document.baseURI||location.href).href;
       const res=await fetch(url,{method:'POST',credentials:'include',body:fd});

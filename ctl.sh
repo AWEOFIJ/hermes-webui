@@ -939,8 +939,24 @@ restart_cmd() {
   probe_host="$(_probe_target_host "${host}")"
 
   echo "[ctl] Restarting Hermes WebUI on ${probe_host}:${port}"
-  # stop_cmd already clears port listeners; ignore non-zero if something foreign remains
-  stop_cmd || true
+  if command -v systemctl >/dev/null 2>&1 \
+      && systemctl --user cat hermes-webui.service >/dev/null 2>&1 \
+      && [[ "${port}" == "8787" ]]; then
+    systemctl --user daemon-reload
+    systemctl --user restart hermes-webui.service
+    for i in {1..40}; do
+      if hermes_webui_probe_health "${probe_host}" "${port}" "/health" 1 direct >/dev/null 2>&1; then
+        local live_pid
+        live_pid="$(_pids_listening_on_port "${port}" | head -n1 || true)"
+        echo "[ctl] Restart healthy${live_pid:+ (listener PID ${live_pid})}"
+        return 0
+      fi
+      sleep 0.25
+    done
+    echo "[ctl] systemd restarted but /health is unreachable; check systemctl --user status hermes-webui.service" >&2
+    return 1
+  fi
+  # Fallback for platforms without the user service.
 
   if ! _wait_port_free "${probe_host}" "${port}" 12; then
     echo "[ctl] Port ${probe_host}:${port} still busy after stop; forcing listener cleanup" >&2

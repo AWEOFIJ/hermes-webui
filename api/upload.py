@@ -149,16 +149,23 @@ def _session_attachment_dir(session_id: str, *, root: Path | None = None) -> Pat
     return dest_dir
 
 
-def _session_visible_to_active_profile(session) -> bool:
-    """Return whether an upload target session belongs to the active profile."""
+def _session_visible_to_active_profile(session, handler=None) -> bool:
+    """Return whether an upload target matches the request/session profile."""
     session_profile = getattr(session, 'profile', None)
     if not isinstance(session_profile, str):
         session_profile = None
-    return _profiles_match(session_profile, _get_active_profile_name())
+    request_profile = None
+    if handler is not None:
+        try:
+            request_profile = str(getattr(handler, '_upload_profile', '') or '').strip() or None
+        except Exception:
+            request_profile = None
+    active_profile = request_profile or _get_active_profile_name()
+    return _profiles_match(session_profile, active_profile)
 
 
 def _reject_invisible_session(handler, session) -> bool:
-    if _session_visible_to_active_profile(session):
+    if _session_visible_to_active_profile(session, handler):
         return False
     j(handler, {'error': 'Session not found'}, status=404)
     return True
@@ -211,6 +218,9 @@ def handle_upload(handler):
         if content_length > MAX_UPLOAD_BYTES:
             return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
         fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        requested_profile = str(fields.get('profile', '') or '').strip()
+        if requested_profile:
+            handler._upload_profile = requested_profile
         session_id = fields.get('session_id', '')
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
@@ -220,7 +230,16 @@ def handle_upload(handler):
         try:
             s = get_session(session_id)
         except KeyError:
-            return j(handler, {'error': 'Session not found'}, status=404)
+            # Keep uploads on the same recovery/materialization path as chat
+            # start and session detail. A live browser can retain a valid
+            # session_id across a WebUI restart while the in-memory cache has
+            # been rebuilt; rejecting it here produces a misleading 404 before
+            # the attachment is even written.
+            try:
+                from api.routes import _get_or_materialize_session
+                s = _get_or_materialize_session(session_id)
+            except (KeyError, PermissionError):
+                return j(handler, {'error': 'Session not found'}, status=404)
         if _reject_invisible_session(handler, s):
             return True
         safe_name = _sanitize_upload_name(filename)

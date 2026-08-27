@@ -2349,6 +2349,22 @@ def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, se
     agent starts, so merge into one dict first and let the active workspace win.
     """
     env = dict(profile_runtime_env or {})
+    # Chat attachments are stored in the WebUI inbox rather than the selected
+    # workspace.  Text-mode image routing hands that validated path to
+    # vision_analyze, so the WebUI worker must allow only this one additional
+    # controlled root through the profile's path guard.
+    try:
+        from api.upload import _attachment_root
+        attachment_root = str(_attachment_root())
+        allowed = env.get('ALLOWED_PATHS') or env.get('ALLOWED_PATH') or ''
+        roots = [item for item in allowed.split(':') if item]
+        if attachment_root not in roots:
+            roots.append(attachment_root)
+        if roots:
+            env['ALLOWED_PATHS'] = ':'.join(roots)
+            env.pop('ALLOWED_PATH', None)
+    except Exception:
+        pass
     env.update({
         'TERMINAL_CWD': str(workspace),
         'HERMES_EXEC_ASK': '1',
@@ -8550,6 +8566,12 @@ def _run_agent_streaming(
             session_id,
             _profile_home,
         )
+        # Some native tools (including vision_analyze's path guard) read the
+        # process environment rather than the thread-local overlay. Keep the
+        # validated attachment root in both layers for this turn.
+        if _thread_env.get('ALLOWED_PATHS'):
+            _safe_profile_runtime_env['ALLOWED_PATHS'] = _thread_env['ALLOWED_PATHS']
+            _safe_profile_runtime_env.pop('ALLOWED_PATH', None)
         _streaming_hermes_home_override_ctx = _set_streaming_hermes_home_override(_profile_home)
         _set_thread_env(**_thread_env)
         # process_complete agent-wakeup wiring (ours-original, Option B): bind

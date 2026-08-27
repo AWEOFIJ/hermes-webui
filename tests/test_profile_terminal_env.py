@@ -98,6 +98,7 @@ def test_streaming_thread_env_allows_profile_terminal_cwd_override():
     assert "def _build_agent_thread_env" in src
     assert "_thread_env = _build_agent_thread_env(" in src
     assert "_set_thread_env(**_thread_env)" in src
+    assert "_safe_profile_runtime_env['ALLOWED_PATHS'] = _thread_env['ALLOWED_PATHS']" in src
     assert "_set_thread_env(\n            **_profile_runtime_env,\n            TERMINAL_CWD" not in src
 
     match = re.search(
@@ -131,3 +132,21 @@ def test_streaming_thread_env_allows_profile_terminal_cwd_override():
     assert env["HERMES_SESSION_PLATFORM"] == "webui"
     assert env["HERMES_HOME"] == "/active/profile/home"
     assert env["TERMINAL_ENV"] == "ssh"
+
+
+def test_streaming_thread_env_allows_webui_attachment_inbox(monkeypatch, tmp_path):
+    """Text-mode vision turns may read only the WebUI attachment inbox."""
+    import api.upload as upload
+
+    monkeypatch.setattr(upload, "_attachment_root", lambda: tmp_path)
+    from api.streaming import _build_agent_thread_env
+
+    env = _build_agent_thread_env(
+        {"ALLOWED_PATHS": "/workspace:/profile", "ALLOWED_PATH": "/legacy"},
+        "/workspace",
+        "session-1",
+        "/profile/home",
+    )
+
+    assert env["ALLOWED_PATHS"] == f"/workspace:/profile:{tmp_path}"
+    assert "ALLOWED_PATH" not in env

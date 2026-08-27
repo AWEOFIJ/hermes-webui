@@ -1436,7 +1436,15 @@ async function send(){
       showToast(t('external_reply_no_attachments'),4000,'error');
       S.pendingFiles=[];renderTray();
     }
+    // Mirror the normal send path (#5471): clear the persisted draft and
+    // suppress draft restore BEFORE the external reply round-trips. The
+    // reply path re-imports the session (import_cli) and loadSession restores
+    // the server-side composer draft; without this suppression the just-sent
+    // text is repopulated into the textarea, making Enter look like it never
+    // sent anything.
+    const _extSid=S.session.session_id;
     $('msg').value='';autoResize();renderTray();
+    if(_extSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(_extSid,text,[]);
     await _sendExternalSessionReply(text);
     return;
   }

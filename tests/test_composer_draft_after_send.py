@@ -61,6 +61,19 @@ def test_busy_send_paths_clear_persisted_composer_draft():
     )
 
 
+def test_external_session_reply_clears_persisted_composer_draft():
+    """External (messaging) session replies must also clear/suppress the persisted
+    composer draft. Without it the external-reply path's import_cli refresh restores
+    the just-sent text into #msg, making Enter look like it never sent anything."""
+    ext_body = _block(MESSAGES_JS, "if(typeof _isExternalSession==='function' && S.session && _isExternalSession(S.session)){", "if(typeof shouldInterceptCompressionRecoveryContinuation==='function'")
+    assert "_clearComposerDraft(_extSid,text,[])" in ext_body, (
+        "external session send must clear the persisted draft (suppress restore)"
+    )
+    assert ext_body.index("_clearComposerDraft(_extSid,text,[])") < ext_body.index("_sendExternalSessionReply(text)"), (
+        "draft suppression must be issued BEFORE the external reply round-trips"
+    )
+
+
 def test_file_signature_survives_server_draft_round_trip():
     """#5471 attachment case: the signature of a just-sent text+File payload must
     MATCH the signature of the same payload after it round-trips through the server
